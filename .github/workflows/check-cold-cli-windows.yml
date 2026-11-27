@@ -1,0 +1,76 @@
+name: Check the reviewed cold compiler on Windows
+
+on:
+  push:
+    branches: [max/bench-cold-cli-windows-1127]
+
+permissions:
+  contents: read
+
+jobs:
+  compiler:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    env:
+      REVIEWED_SOURCE: 20c0767123f2d66d3f8cbb5c62f26fe7e2a42381
+      RUSTUP_TOOLCHAIN: 1.100.0-${{ matrix.target }}
+      CARGO_TERM_COLOR: never
+      PYTHONUTF8: '1'
+    steps:
+      - name: Check out the comparison driver
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: driver
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Check out the measured compiler
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: source
+          ref: ${{ env.REVIEWED_SOURCE }}
+          persist-credentials: false
+      - name: Verify the source and install its pinned native toolchain
+        working-directory: source
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:REVIEWED_SOURCE) { throw 'Unexpected compiler source' }
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $identity = rustc -vV
+          $identity
+          if ($identity -notcontains 'host: ${{ matrix.target }}') { throw 'Unexpected compiler architecture' }
+          "CARGO_TARGET_DIR=$env:RUNNER_TEMP\tsrs-target" >> $env:GITHUB_ENV
+      - name: Check all workspace targets
+        working-directory: source
+        run: cargo check --locked --all-targets --config 'build.warnings="deny"'
+      - name: Build the CLI and run the Go comparison
+        working-directory: source
+        shell: pwsh
+        run: |
+          cargo build --locked --profile ci -p tsrs_cli
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $compiler = Join-Path $env:CARGO_TARGET_DIR 'ci\tsrs.exe'
+          Get-FileHash $compiler -Algorithm SHA256 | Format-List
+          python ../driver/.github/scripts/check-cold-windows.py $compiler ../driver/.github/scripts/cold-windows-oracle.json
+      - name: Check diagnostic ownership, reusable programs and diagnostic counters
+        working-directory: source
+        shell: pwsh
+        run: |
+          $cases = @(
+            [pscustomobject]@{ package = 'tsrs_compiler'; test = 'a_declaration_piece_returns_its_cached_diagnostics' },
+            [pscustomobject]@{ package = 'tsrs_compiler'; test = 'no_emit_program_can_check_again_and_query_each_files_checker' },
+            [pscustomobject]@{ package = 'tsrs_cli'; test = 'extended_diagnostics_preserves_the_ordered_checker_counters' }
+          )
+          foreach ($case in $cases) {
+            $output = cargo test --locked --profile ci -p $case.package --test integration $case.test
+            $output
+            if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch 'test result: ok\. 1 passed;') { throw $case.test }
+          }

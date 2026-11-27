@@ -1,0 +1,40 @@
+{
+  "check": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": "",
+    "files": {}
+  },
+  "diagnostic": {
+    "exit": 2,
+    "stdout": "src/error.ts(1,28): error TS2322: Type 'string' is not assignable to type 'number'.\n",
+    "stderr": "",
+    "files": {}
+  },
+  "declarations": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": "",
+    "files": {
+      "entry.d.ts": "239909d11ca9629a9b3f3ab575a7915c7fb131c978d642d401f80e2ee6c8255e",
+      "entry.d.ts.map": "eec89d4267c109c543372f53686813d17f445535cbfb4a1eafc4c968b81a730d",
+      "modèle.d.ts": "4cf8500510280d893c7c401826bce1f1e95f8d542af723353554ff096dda85fb",
+      "modèle.d.ts.map": "93aafd04bd7410a380e75edbadeb38db502936365791638a0f455bb8f3da61a4"
+    }
+  },
+  "full": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": "",
+    "files": {
+      "entry.d.ts": "239909d11ca9629a9b3f3ab575a7915c7fb131c978d642d401f80e2ee6c8255e",
+      "entry.d.ts.map": "eec89d4267c109c543372f53686813d17f445535cbfb4a1eafc4c968b81a730d",
+      "entry.js": "82b2426330124e3cff9177dd77d231644266accf9a40e7586c17009dda006dc9",
+      "entry.js.map": "687d7280955a355efbd7ed5d6c4cf254af4b0287e10b6e3c1a6da82a518d819c",
+      "modèle.d.ts": "4cf8500510280d893c7c401826bce1f1e95f8d542af723353554ff096dda85fb",
+      "modèle.d.ts.map": "93aafd04bd7410a380e75edbadeb38db502936365791638a0f455bb8f3da61a4",
+      "modèle.js": "de0f895cddaec5f4692c40cd6c022f30c0745bce02ca9f8822740679f7007c78",
+      "modèle.js.map": "101e6946c2c593bba8608a7a925f753ba51e762f53fad11c528b951c5418c374"
+    }
+  }
+}
