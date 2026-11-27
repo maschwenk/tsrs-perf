@@ -510,6 +510,7 @@ pub struct DiagnosticsCollection {
     file_diagnostics_sorted: FxHashSet<Path>,
     non_file_diagnostics: Vec<P<Diagnostic>>,
     non_file_diagnostics_sorted: bool,
+    unreported_outside_piece: FxHashSet<P<Diagnostic>>,
     diagnostic_index: FxHashMap<DiagnosticLocationKey, P<Diagnostic>>,
     diagnostic_collisions: FxHashMap<DiagnosticLocationKey, Vec<P<Diagnostic>>>,
 }
@@ -518,6 +519,28 @@ impl DiagnosticsCollection {
     /// The number of distinct diagnostics added so far.
     pub fn count(&self) -> usize {
         self.count
+    }
+
+    /// Cached reports inside these statements belong to the piece even if the checker skips their checks.
+    /// Keep earlier reports elsewhere in the file only if checking the piece reports them again.
+    pub fn begin_file_piece(&mut self, file: P<SourceFile>, span: Option<TextRange>) {
+        self.unreported_outside_piece = self
+            .file_diagnostics
+            .get(file.path())
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|d| !span.is_some_and(|s| d.loc().is_some_and(|loc| loc.contained_by(s))))
+            .collect();
+    }
+
+    pub fn finish_file_piece(&mut self, file: P<SourceFile>) -> Vec<P<Diagnostic>> {
+        let excluded = std::mem::take(&mut self.unreported_outside_piece);
+        let mut diagnostics = self.get_diagnostics_for_file(file);
+        if !excluded.is_empty() {
+            diagnostics.retain(|d| !excluded.contains(d));
+        }
+        diagnostics
     }
 
     pub fn add(&mut self, diagnostic: P<Diagnostic>) -> P<Diagnostic> {
@@ -529,12 +552,14 @@ impl DiagnosticsCollection {
             Entry::Occupied(e) => {
                 let existing = *e.get();
                 if equal_diagnostics(existing, diagnostic) {
+                    self.unreported_outside_piece.remove(&existing);
                     return existing;
                 }
                 let collisions = self.diagnostic_collisions.entry(e.key().clone()).or_default();
                 if let Some(result) = collisions.iter().find_map(|&collision| {
                     if equal_diagnostics(collision, diagnostic) { Some(collision) } else { None }
                 }) {
+                    self.unreported_outside_piece.remove(&result);
                     return result;
                 }
                 collisions.push(diagnostic);

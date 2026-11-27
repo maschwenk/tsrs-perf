@@ -179,24 +179,24 @@ impl Checker {
         &mut self,
         ctx: &Context,
         source_file: P<SourceFile>,
-        statements: std::ops::Range<usize>,
+        range: std::ops::Range<usize>,
     ) -> (Vec<P<Diagnostic>>, Vec<P<Diagnostic>>) {
         debug_assert!(source_file.is_declaration_file());
         self.check_not_canceled();
         let saved_checking_file = self.checking_file.replace(source_file);
         self.ctx = Some(ctx.clone());
-        // Only what this piece adds is handed back: this checker may already hold diagnostics located in the file from
-        // checking its own files (a symbol-level check reports at every declaration of the symbol); those the owner
-        // finds for itself when it checks the file, exactly as it does for a file that is not split.
-        let before: rustc_hash::FxHashSet<P<Diagnostic>> =
-            self.diagnostics.get_diagnostics_for_file(source_file).into_iter().collect();
-        let suggestions_before: rustc_hash::FxHashSet<P<Diagnostic>> =
-            self.suggestion_diagnostics.get_diagnostics_for_file(source_file).into_iter().collect();
+        let statements = &source_file.statements.nodes()[range.clone()];
+        let span = statements
+            .first()
+            .zip(statements.last())
+            .map(|(first, last)| TextRange::from_text_pos(first.pos(), last.end()));
+        self.diagnostics.begin_file_piece(source_file, span);
+        self.suggestion_diagnostics.begin_file_piece(source_file, span);
         if !self.source_file_links.get(source_file).type_checked.get() {
             if crate::uniontrace::enabled() {
-                crate::uniontrace::report_check_file(self, source_file, Some(&statements));
+                crate::uniontrace::report_check_file(self, source_file, Some(&range));
             }
-            self.check_source_elements(&source_file.statements.nodes()[statements]);
+            self.check_source_elements(statements);
             self.check_deferred_nodes(source_file);
             self.produce_deferred_diagnostics();
             self.reported_unreachable_nodes.clear();
@@ -207,15 +207,9 @@ impl Checker {
         self.flush_too_complex_reports();
         self.ctx = None;
         self.checking_file = saved_checking_file;
-        let added = |all: Vec<P<Diagnostic>>, before: &rustc_hash::FxHashSet<P<Diagnostic>>| {
-            all.into_iter().filter(|d| !before.contains(d)).collect::<Vec<_>>()
-        };
         (
-            added(self.diagnostics.get_diagnostics_for_file(source_file), &before),
-            added(
-                self.suggestion_diagnostics.get_diagnostics_for_file(source_file),
-                &suggestions_before,
-            ),
+            self.diagnostics.finish_file_piece(source_file),
+            self.suggestion_diagnostics.finish_file_piece(source_file),
         )
     }
 
