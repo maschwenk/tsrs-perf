@@ -1866,7 +1866,7 @@ impl Checker {
                     new_alias,
                 )
             } else if target.object_flags().intersects(ObjectFlags::Mapped) {
-                self.instantiate_mapped_type(target, new_mapper, new_alias)
+                self.instantiate_mapped_type(target, type_parameters, new_mapper, new_alias)
             } else {
                 self.instantiate_anonymous_type(target, new_mapper, new_alias)
             };
@@ -2232,6 +2232,7 @@ impl Checker {
     fn instantiate_mapped_type(
         &mut self,
         t: P<Type>,
+        type_parameters: &[P<Type>],
         m: P<TypeMapper>,
         alias: Option<P<TypeAlias>>,
     ) -> P<Type> {
@@ -2253,7 +2254,15 @@ impl Checker {
                 let reduced = self.get_reduced_type(mapped_type_variable);
                 return self.map_type_with_alias(
                     reduced,
-                    |c, s| c.instantiate_mapped_type_constituent(t, type_variable, m, s),
+                    |c, s| {
+                        c.instantiate_mapped_type_constituent(
+                            t,
+                            type_parameters,
+                            type_variable,
+                            m,
+                            s,
+                        )
+                    },
                     alias,
                 );
             }
@@ -2270,6 +2279,7 @@ impl Checker {
     fn instantiate_mapped_type_constituent(
         &mut self,
         t: P<Type>,
+        type_parameters: &[P<Type>],
         type_variable: P<Type>,
         m: P<TypeMapper>,
         s: P<Type>,
@@ -2309,12 +2319,48 @@ impl Checker {
                 let types: Vec<P<Type>> = s
                     .types()
                     .iter()
-                    .map(|&u| self.instantiate_mapped_type_constituent(t, type_variable, m, u))
+                    .map(|&u| {
+                        self.instantiate_mapped_type_constituent(
+                            t,
+                            type_parameters,
+                            type_variable,
+                            m,
+                            u,
+                        )
+                    })
                     .collect();
                 return self.get_intersection_type(&types);
             }
         }
-        self.instantiate_anonymous_type(t, prepend_type_mapping(type_variable, s, Some(m)), None)
+        let mapper = prepend_type_mapping(type_variable, s, Some(m));
+        if !cfg!(feature = "experimental-homomorphic-reinstantiation")
+            || mapper.map(self, type_variable) != s
+        {
+            return self.instantiate_anonymous_type(t, mapper, None);
+        }
+        // Microsoft/TypeScript 58fb153d, getMappedTypeConstituentInstantiation.
+        // The constituent uses its own mapped alias. When the guard above fails, the merged
+        // mapper remaps the constituent and caching under this key is order-dependent.
+        let before = self.too_complex_reports;
+        let alias = self.instantiate_type_alias(t.alias(), Some(mapper));
+        let mut args = self.free_type_lists.pop().unwrap_or_default();
+        args.extend(type_parameters.iter().map(|tp| mapper.map(self, *tp)));
+        let key = get_type_instantiation_key(&args, alias.into(), false);
+        self.free_type_list(args);
+        if let Some(hit) = self
+            .object_type_instantiations
+            .own
+            .get(&t)
+            .and_then(|table| table.get(&key))
+            .or_else(|| self.object_type_instantiations.base_get(&t)?.get(&key))
+        {
+            return hit;
+        }
+        let result = self.instantiate_anonymous_type(t, mapper, alias);
+        if !self.too_complex_since(before) {
+            self.object_type_instantiations.own.get_mut(&t).unwrap().insert(key, result);
+        }
+        result
     }
 
     // checker.go:23005

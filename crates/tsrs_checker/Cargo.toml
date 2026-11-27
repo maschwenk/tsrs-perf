@@ -16,6 +16,8 @@ description = "TypeScript type checker for tsrs"
 workspace = true
 
 [features]
+# Uses the post-7.1-beta mapped constituent identities from microsoft/TypeScript@58fb153d.
+experimental-homomorphic-reinstantiation = []
 # Creation-site counters (src/sitecount.rs): `#[track_caller]` on the checker's object constructors.
 site-counts = []
 # TSRS_WORK_CENSUS: attribute checker work to source patterns (workcensus.rs, docs/DEBUGGING.md).
