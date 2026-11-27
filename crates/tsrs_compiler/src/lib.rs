@@ -37,8 +37,8 @@ pub use fileregions::{
     lazy_dts_allowed, leaf_settings_from_env, stats_report as leaf_stats_report,
 };
 pub use host::{
-    CompilerHost, TraceFn, get_content_mapped_source_files_with, new_cached_fs_compiler_host,
-    new_compiler_host,
+    CompilerHost, TraceFn, get_content_mapped_source_files_with, new_batch_compiler_host,
+    new_cached_fs_compiler_host, new_compiler_host,
 };
 pub use program::{
     CreateCheckerPool, CreateModuleResolver, Program, ProgramConfig, ProgramOptions,

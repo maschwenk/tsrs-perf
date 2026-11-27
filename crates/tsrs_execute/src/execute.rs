@@ -421,7 +421,15 @@ fn perform_compilation(
         host: content_mapper_host.clone(),
         project: content_mapper_project.clone(),
     };
-    let host = new_cached_fs_compiler_host(
+    let make_host = if cfg!(target_os = "linux")
+        && testing.is_none()
+        && std::env::var_os("TSRS_BATCH_SOCKET").is_some()
+    {
+        tsrs_compiler::new_batch_compiler_host
+    } else {
+        new_cached_fs_compiler_host
+    };
+    let host = make_host(
         sys.get_current_directory(),
         sys.fs(),
         sys.default_library_path(),

@@ -23,6 +23,10 @@ rustc-hash.workspace = true
 bitflags.workspace = true
 memchr.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+sha2.workspace = true
+rustix = { workspace = true, features = ["net"] }
+
 [lib]
 test = false
 doctest = false

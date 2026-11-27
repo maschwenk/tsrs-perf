@@ -321,12 +321,22 @@ pub struct ScannerState {
 /// An owning snapshot for temporary text changes, unlike a `mark()` snapshot.
 #[must_use]
 pub struct SavedScannerState {
+    #[cfg(target_os = "linux")]
+    batch: Option<(&'static str, crate::tape::Tape)>,
     state: ScannerState,
     comment_directives: Vec<CommentDirective>,
 }
 
 #[derive(Default)]
 pub struct Scanner {
+    #[cfg(target_os = "linux")]
+    tape: Option<crate::tape::Tape>,
+    #[cfg(target_os = "linux")]
+    batch_audit: bool,
+    #[cfg(target_os = "linux")]
+    audit_transitions: u32,
+    #[cfg(target_os = "linux")]
+    audit_bytes: u64,
     pub(crate) text: &'static str,
     end: u32,
     language_variant: LanguageVariant,
@@ -619,6 +629,8 @@ impl Scanner {
     /// Moves the token state and directive buffer out before a temporary text change.
     pub fn take_state(&mut self) -> SavedScannerState {
         SavedScannerState {
+            #[cfg(target_os = "linux")]
+            batch: self.tape.take().map(|tape| (self.text, tape)),
             state: std::mem::take(&mut self.state),
             comment_directives: std::mem::take(&mut self.comment_directives),
         }
@@ -626,6 +638,12 @@ impl Scanner {
 
     /// Restores the owned snapshot after the caller has restored the scanner's text.
     pub fn restore_state(&mut self, saved: SavedScannerState) {
+        #[cfg(target_os = "linux")]
+        {
+            self.tape = saved
+                .batch
+                .and_then(|(source, tape)| std::ptr::eq(source, self.text).then_some(tape));
+        }
         self.state = saved.state;
         self.comment_directives = saved.comment_directives;
     }
@@ -726,6 +744,10 @@ impl Scanner {
     }
 
     pub fn set_text(&mut self, text: &'static str) {
+        #[cfg(target_os = "linux")]
+        {
+            self.tape = None;
+        }
         self.text = text;
         self.end = text.len() as u32;
         self.state = ScannerState::default();
@@ -900,6 +922,118 @@ impl Scanner {
             return &self.text[start..start + s.len()];
         }
         alloc_str(s)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn start_batch_file(
+        &mut self,
+        opts: &ast::SourceFileParseOptions,
+        kind: tsrs_core::ScriptKind,
+    ) {
+        self.tape = crate::tape::open(opts, kind, self.text);
+        self.batch_audit = self.tape.is_some() && std::env::var_os("TSRS_BATCH_AUDIT").is_some();
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn finish_batch_file(&mut self) {
+        if self.audit_transitions != 0
+            && let Some(dir) = std::env::var_os("TSRS_BATCH_AUDIT_DIR")
+        {
+            use std::io::Write;
+            let path = std::path::PathBuf::from(dir).join(format!("{}.tsv", std::process::id()));
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .expect("audit log");
+            file.write_all(
+                format!("{}\t{}\n", self.audit_transitions, self.audit_bytes).as_bytes(),
+            )
+            .expect("write audit");
+        }
+        if let Some(tape) = self.tape.take() {
+            tape.publish();
+        }
+    }
+
+    pub fn scan_parser_token(&mut self) -> Kind {
+        #[cfg(target_os = "linux")]
+        if self.tape.is_some()
+            && self.skip_trivia
+            && self.on_error
+            && self.state.skip_jsdoc_leading_asterisks == 0
+            && self.end as usize == self.text.len()
+            && self.language_variant == LanguageVariant::Standard
+            && self.script_target == ScriptTarget::NONE
+        {
+            return self.scan_batch_token();
+        }
+        self.scan()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scan_batch_token(&mut self) -> Kind {
+        let pos = self.state.pos;
+        if let Some((start, end, kind, flags)) = self.tape.as_mut().unwrap().lookup(pos)
+            && let Some(text) = self.text.get(start as usize..end as usize)
+        {
+            if self.batch_audit {
+                self.audit_transitions += 1;
+                self.audit_bytes += u64::from(end - pos);
+                let value = if token_is_identifier_or_keyword(kind) {
+                    text
+                } else {
+                    self.state.token_value
+                };
+                let directives = self.state.comment_directives_len;
+                let errors = self.errors.len();
+                assert_eq!(kind, self.scan());
+                assert_eq!(
+                    (pos, start, end, flags, value, directives, errors),
+                    (
+                        self.state.full_start_pos,
+                        self.state.token_start,
+                        self.state.pos,
+                        self.state.token_flags,
+                        self.state.token_value,
+                        self.state.comment_directives_len,
+                        self.errors.len()
+                    )
+                );
+                return kind;
+            }
+            self.state.full_start_pos = pos;
+            self.state.pos = end;
+            self.state.token_start = start;
+            self.state.token_flags = flags;
+            self.state.token = kind;
+            if token_is_identifier_or_keyword(kind) {
+                self.state.token_value = text;
+            }
+            return kind;
+        }
+        if matches!(self.tape, Some(crate::tape::Tape::Replay { .. })) {
+            return self.scan();
+        }
+        let directives = self.state.comment_directives_len;
+        let kind = self.scan();
+        if self.errors.is_empty() && directives == self.state.comment_directives_len {
+            // Ordinary punctuation preserves the incoming token value. For words, record
+            // only values that are exactly the scanned source range, without escape decoding.
+            if (Kind::OpenBraceToken..=Kind::CaretEqualsToken).contains(&kind)
+                || (token_is_identifier_or_keyword(kind)
+                    && self.token_text() == self.state.token_value)
+            {
+                self.tape.as_mut().unwrap().add(
+                    pos,
+                    self.state.token_start,
+                    self.state.pos,
+                    kind,
+                    self.state.token_flags,
+                );
+            }
+        }
+        kind
     }
 
     pub fn scan(&mut self) -> Kind {

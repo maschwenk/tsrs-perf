@@ -323,15 +323,42 @@ fn parse_source_file_static(
     source_text: &'static str,
     script_kind: ScriptKind,
 ) -> P<SourceFile> {
+    parse_static(opts, source_text, script_kind, false)
+}
+
+/// Only the one-shot CLI host supplies a process-lifetime source. Freeable regions use
+/// their existing parse entry points and own every byte they need.
+pub fn parse_batch_source(
+    opts: SourceFileParseOptions,
+    text: &'static str,
+    kind: ScriptKind,
+) -> P<SourceFile> {
+    parse_static(opts, text, kind, true)
+}
+
+fn parse_static(
+    opts: SourceFileParseOptions,
+    source_text: &'static str,
+    script_kind: ScriptKind,
+    batch: bool,
+) -> P<SourceFile> {
     crate::jsdoc::init();
     let mut p = new_parser();
     p.initialize_state_static(opts, source_text, script_kind);
     p.source_text_index = ast::register_source_text(source_text);
-    p.next_token();
-    if p.script_kind == ScriptKind::JSON {
-        return p.parse_json_text();
+    if batch {
+        #[cfg(target_os = "linux")]
+        p.scanner.start_batch_file(&p.opts, script_kind);
     }
-    p.parse_source_file_worker()
+    p.next_token();
+    let file = if p.script_kind == ScriptKind::JSON {
+        p.parse_json_text()
+    } else {
+        p.parse_source_file_worker()
+    };
+    #[cfg(target_os = "linux")]
+    p.scanner.finish_batch_file();
+    file
 }
 
 impl Parser {
@@ -712,7 +739,7 @@ impl Parser {
         {
             self.report_keyword_with_escape();
         }
-        self.token = self.scanner.scan();
+        self.token = self.scanner.scan_parser_token();
         self.report_scan_errors();
         self.token
     }
@@ -728,7 +755,7 @@ impl Parser {
     }
 
     pub(crate) fn next_token_without_check(&mut self) -> Kind {
-        self.token = self.scanner.scan();
+        self.token = self.scanner.scan_parser_token();
         self.report_scan_errors();
         self.token
     }

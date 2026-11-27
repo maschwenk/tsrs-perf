@@ -1472,6 +1472,8 @@ dependencies = [
  "bitflags",
  "memchr",
  "rustc-hash",
+ "rustix",
+ "sha2",
  "tsrs_ast",
  "tsrs_core",
  "tsrs_diagnostics",

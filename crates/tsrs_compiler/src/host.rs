@@ -41,6 +41,7 @@ pub trait CompilerHost: Send + Sync {
 
 // host.go:35
 pub struct CompilerHostImpl {
+    batch: bool,
     current_directory: String,
     fs: Arc<dyn FS>,
     default_library_path: String,
@@ -77,15 +78,55 @@ pub fn new_compiler_host(
     trace: Option<Box<TraceFn>>,
     content_mapper_project: Option<Arc<dyn Project>>,
 ) -> Arc<dyn CompilerHost> {
+    Arc::new(make_compiler_host(
+        current_directory,
+        fs,
+        default_library_path,
+        extended_config_cache,
+        trace,
+        content_mapper_project,
+    ))
+}
+
+pub fn new_batch_compiler_host(
+    current_directory: &str,
+    fs: Arc<dyn FS>,
+    default_library_path: &str,
+    extended_config_cache: Option<Arc<dyn ExtendedConfigCache + Send>>,
+    trace: Option<Box<TraceFn>>,
+    content_mapper_project: Option<Arc<dyn Project>>,
+) -> Arc<dyn CompilerHost> {
+    let fs: Arc<dyn FS> = Arc::new(tsrs_vfs::cachedvfs::from(fs));
+    let mut host = make_compiler_host(
+        current_directory,
+        fs,
+        default_library_path,
+        extended_config_cache,
+        trace,
+        content_mapper_project,
+    );
+    host.batch = true;
+    Arc::new(host)
+}
+
+fn make_compiler_host(
+    current_directory: &str,
+    fs: Arc<dyn FS>,
+    default_library_path: &str,
+    extended_config_cache: Option<Arc<dyn ExtendedConfigCache + Send>>,
+    trace: Option<Box<TraceFn>>,
+    content_mapper_project: Option<Arc<dyn Project>>,
+) -> CompilerHostImpl {
     let trace = trace.unwrap_or_else(|| Box::new(|_: &'static Message, _: &[&dyn Display]| {}));
-    Arc::new(CompilerHostImpl {
+    CompilerHostImpl {
+        batch: false,
         current_directory: current_directory.to_string(),
         fs,
         default_library_path: default_library_path.to_string(),
         extended_config_cache,
         trace,
         content_mapper_project,
-    })
+    }
 }
 
 // host.go:101. Shared with the build orchestrator's per-project compiler host (build/compilerHost.go:41), which
@@ -138,7 +179,11 @@ impl CompilerHost for CompilerHostImpl {
         // bytes, same `&'static str` the identifiers point into, so nothing downstream changes.
         if let Some(text) = tsrs_vfs::bundled::embedded_file(&opts.file_name) {
             return Some(tsrs_core::festats::timed(tsrs_core::festats::Cat::Parse, || {
-                tsrs_parser::parse_source_file_embedded(opts, text, script_kind)
+                if self.batch && tsrs_core::arena::current_region().is_none() {
+                    tsrs_parser::parse_batch_source(opts, text, script_kind)
+                } else {
+                    tsrs_parser::parse_source_file_embedded(opts, text, script_kind)
+                }
             }));
         }
         let text = tsrs_core::festats::timed(tsrs_core::festats::Cat::Read, || {
@@ -152,7 +197,11 @@ impl CompilerHost for CompilerHostImpl {
             }));
         }
         Some(tsrs_core::festats::timed(tsrs_core::festats::Cat::Parse, || {
-            tsrs_parser::parse_source_file_owned(opts, text, script_kind)
+            if self.batch && tsrs_core::arena::current_region().is_none() {
+                tsrs_parser::parse_batch_source(opts, text.leak(), script_kind)
+            } else {
+                tsrs_parser::parse_source_file_owned(opts, text, script_kind)
+            }
         }))
     }
 
