@@ -1888,3 +1888,45 @@ fn did_change_file_with_synthetic_imports_reuses_the_program() {
     }
     session.close();
 }
+#[test]
+fn overlapping_snapshots_keep_edited_files_until_their_last_reader_finishes() {
+    let paths: Vec<_> = (0..192).map(|i| format!("/project/file{i:03}.ts")).collect();
+    let mut files: Vec<_> = paths.iter().map(|p| (p.as_str(), "export const x = 0;")).collect();
+    files.push(("/project/tsconfig.json", r#"{ "compilerOptions": { "noLib": true } }"#));
+    let (session, _) = setup(&files);
+    let (a, b) = (paths[0].as_str(), paths[130].as_str());
+    open(&session, &files, a);
+    open(&session, &files, b);
+    let a_uri = uri(&format!("file://{a}"));
+    let b_uri = uri(&format!("file://{b}"));
+    let change = |doc: &lsproto::DocumentUri, version, digit| {
+        session.did_change_file(&ctx(), doc.clone(), version, vec![partial(0, 17, 18, digit)]);
+    };
+    let _ = ls_program(&session, a);
+    change(&a_uri, 2, "1");
+    let mut retired = Vec::new();
+    session.with_snapshot_for_document(&ctx(), &a_uri, |first| {
+        let first_program = first.get_default_project(&a_uri).unwrap().get_program().unwrap();
+        let a1 = first_program.get_source_file(a).unwrap();
+        let b0 = first_program.get_source_file(b).unwrap();
+        retired.extend([parse_cache_key_for_file(a1), parse_cache_key_for_file(b0)]);
+
+        change(&b_uri, 2, "2");
+        session.with_snapshot_for_document(&ctx(), &b_uri, |second| {
+            let second_program = second.get_default_project(&b_uri).unwrap().get_program().unwrap();
+            let b2 = second_program.get_source_file(b).unwrap();
+            change(&a_uri, 3, "3");
+            let current = ls_program(&session, a);
+            assert_eq!(current.get_source_file(a).unwrap().text(), "export const x = 3;");
+            assert_eq!(current.get_source_file(b), Some(b2));
+            assert_eq!(a1.text(), "export const x = 1;");
+            assert_eq!(b0.text(), "export const x = 0;");
+            assert_eq!(b2.text(), "export const x = 2;");
+        });
+        assert!(retired.iter().all(|key| session.snapshot_host().parse_cache.has(key)));
+    });
+    session.wait_for_background_tasks();
+    assert!(retired.iter().all(|key| !session.snapshot_host().parse_cache.has(key)));
+    session.close();
+    assert_eq!(session.snapshot_host().parse_cache.len(), 0);
+}

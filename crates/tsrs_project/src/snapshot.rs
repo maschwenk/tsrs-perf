@@ -1024,7 +1024,11 @@ impl Snapshot {
                 if let Some(checker_pool) = &project.checker_pool {
                     checker_pool.discard();
                 }
-                for &file in program.source_files() {
+                let refs = project
+                    .program_owner
+                    .as_ref()
+                    .map_or_default(|owner| std::mem::take(&mut *owner.parse_refs.lock().unwrap()));
+                for file in refs.individual_files(program.source_files()) {
                     if !file.is_content_mapper_failure_stub()
                         && !file.is_content_mapper_supplemental()
                     {

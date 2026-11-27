@@ -163,3 +163,22 @@ fn test_parse_escaped_dynamic_import_phase() {
         assert!(!file.as_node().flags().contains(NodeFlags::PossiblyContainsImportMeta));
     }
 }
+#[test]
+fn parsed_identifiers_keep_their_source_until_the_file_region_is_released() {
+    let source = std::sync::Arc::<str>::from("function café() {}");
+    let owner = std::sync::Arc::downgrade(&source);
+    {
+        let region = tsrs_core::arena::Region::new(4096);
+        let file = {
+            let _scope = region.enter();
+            tsrs_parser::parse_source_file_shared(
+                SourceFileParseOptions { file_name: "/editor.ts".into(), ..Default::default() },
+                source,
+                ScriptKind::TS,
+            )
+        };
+        assert_eq!(file.text(), "function café() {}");
+        assert_eq!(file.statements().nodes()[0].name().unwrap().text(), "café");
+    }
+    assert!(owner.upgrade().is_none());
+}

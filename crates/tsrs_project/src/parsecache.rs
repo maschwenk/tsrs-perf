@@ -95,6 +95,90 @@ pub fn content_mapped_parse_cache_key_for_duplicate(
 
 pub type ParseCache = RefCountCache<ParseCacheKey, P<SourceFile>, Arc<dyn FileHandle>>;
 
+// An unchanged run of ordinary files can keep one set of cache references across program versions.
+// Bounded blocks let one edit replace its block without retaining older versions of other edited files.
+const FILES_PER_PARSE_BLOCK: usize = 64;
+
+#[derive(Clone, Default)]
+pub(crate) struct SharedParseRefs {
+    blocks: Vec<Option<Arc<ParseRefBlock>>>,
+}
+
+struct ParseRefBlock {
+    cache: Arc<ParseCache>,
+    keys: Vec<ParseCacheKey>,
+}
+
+impl ParseRefBlock {
+    fn new(cache: &Arc<ParseCache>, files: &[P<SourceFile>]) -> Self {
+        let mut block = Self { cache: Arc::clone(cache), keys: Vec::with_capacity(files.len()) };
+        for &file in files {
+            let key = parse_cache_key_for_file(file);
+            cache.ref_(&key);
+            block.keys.push(key);
+        }
+        block
+    }
+}
+
+impl Drop for ParseRefBlock {
+    fn drop(&mut self) {
+        for key in &self.keys {
+            self.cache.deref(key);
+        }
+    }
+}
+
+impl SharedParseRefs {
+    pub(crate) fn for_clone(
+        &self,
+        cache: &Arc<ParseCache>,
+        previous: &[P<SourceFile>],
+        next: &[P<SourceFile>],
+        acquired: Option<P<SourceFile>>,
+    ) -> Self {
+        let blocks = next
+            .chunks(FILES_PER_PARSE_BLOCK)
+            .enumerate()
+            .map(|(index, files)| {
+                // The changed file already has a reference from the host, even when its text was unchanged.
+                if acquired.is_some_and(|file| files.contains(&file)) {
+                    return None;
+                }
+                let start = index * FILES_PER_PARSE_BLOCK;
+                if let Some(Some(block)) = self.blocks.get(index)
+                    && Arc::ptr_eq(cache, &block.cache)
+                    && previous.get(start..start + files.len()) == Some(files)
+                    && block.keys.len() == files.len()
+                {
+                    return Some(Arc::clone(block));
+                }
+                if files.iter().any(|file| {
+                    !file.content_mapper().is_empty()
+                        || file.is_content_mapper_failure_stub()
+                        || file.is_content_mapper_supplemental()
+                }) {
+                    return None;
+                }
+                Some(Arc::new(ParseRefBlock::new(cache, files)))
+            })
+            .collect();
+        Self { blocks }
+    }
+
+    // These files retain their individual references, including mapped files and their special cases.
+    pub(crate) fn individual_files<'a>(
+        &'a self,
+        files: &'a [P<SourceFile>],
+    ) -> impl Iterator<Item = P<SourceFile>> + 'a {
+        files
+            .chunks(FILES_PER_PARSE_BLOCK)
+            .enumerate()
+            .filter(|(index, _)| !matches!(self.blocks.get(*index), Some(Some(_))))
+            .flat_map(|(_, files)| files.iter().copied())
+    }
+}
+
 /// Tracks the parse-cache references acquired by one snapshot clone, in both the parse cache and the
 /// content-mapped parse cache.
 ///
@@ -208,11 +292,11 @@ pub fn new_parse_cache(options: RefCountCacheOptions) -> ParseCache {
     let parse_regions = Arc::clone(&regions);
     let mut cache =
         new_ref_count_cache(options, move |key: &ParseCacheKey, fh: Arc<dyn FileHandle>| {
-            let text = fh.content();
+            let text = fh.shared_content();
             let region = Region::new(file_region_first_chunk(text.len()));
             let file = {
                 let _scope = region.enter();
-                let file = tsrs_parser::parse_source_file(
+                let file = tsrs_parser::parse_source_file_shared(
                     key.source_file_parse_options.clone(),
                     text,
                     key.script_kind,
@@ -222,10 +306,6 @@ pub fn new_parse_cache(options: RefCountCacheOptions) -> ParseCache {
                 file
             };
             region.trim();
-            let text_index = file.text_index.get();
-            region.on_free(Box::new(move || {
-                tsrs_ast::unregister_source_text(text_index);
-            }));
             parse_regions.lock().unwrap().insert(file.addr(), region);
             file
         });
@@ -243,7 +323,7 @@ pub fn new_parse_cache(options: RefCountCacheOptions) -> ParseCache {
     cache
 }
 
-// The text is copied into the region; text, AST and binder data take about 8 times the text (measured on the
+// AST and binder data together with the source text take about 8 times the text (measured on the
 // private monorepo: 7.8x on average). Regions grow by a quarter when this is exceeded, and the region is trimmed to
 // what it used after binding.
 fn file_region_first_chunk(text_len: usize) -> usize {

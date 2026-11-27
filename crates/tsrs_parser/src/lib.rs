@@ -10,7 +10,7 @@ mod utilities;
 pub(crate) use parser_1::{Parser, ParsingContext};
 pub use parser_1::{
     enable_lazy_dts, parse_isolated_entity_name, parse_source_file, parse_source_file_embedded,
-    parse_source_file_keep_text, parse_source_file_owned,
+    parse_source_file_keep_text, parse_source_file_owned, parse_source_file_shared,
 };
 pub(crate) use types::ParseFlags;
 pub use utilities::get_jsdoc_comment_ranges;

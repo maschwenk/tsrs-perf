@@ -685,6 +685,12 @@ fn poison_mode() -> bool {
     }
 }
 
+/// Keeps immutable source text alive in the current allocation target. Poison builds need their own
+/// arena copy so a stale slice still lands in the poisoned and quarantined bytes.
+pub fn retain_source_text(text: Arc<str>) -> &'static str {
+    if poison_mode() { crate::alloc_str(&text) } else { crate::alloc(text).as_ref() }
+}
+
 /// The free-list class of a block of `size` bytes and alignment `align` at address `addr`, or 0 when such blocks
 /// are not recycled.
 #[inline]

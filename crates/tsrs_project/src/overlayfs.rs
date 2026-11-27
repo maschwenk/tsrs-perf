@@ -29,6 +29,10 @@ pub type OverlayMap = Arc<FxHashMap<Path, Arc<Overlay>>>;
 pub trait FileContent {
     fn content(&self) -> &str;
     fn hash(&self) -> Hash128;
+    /// Owns the same immutable source version beyond a borrow of this handle.
+    fn shared_content(&self) -> Arc<str> {
+        Arc::from(self.content())
+    }
 }
 
 // Go `FileHandle` interface values are `Arc<dyn FileHandle>`.
@@ -45,7 +49,7 @@ pub trait FileHandle: FileContent + Send + Sync {
 #[derive(Clone, Default)]
 pub struct FileBase {
     pub(crate) file_name: String,
-    pub(crate) content: String,
+    pub(crate) content: Arc<str>,
     pub(crate) hash: Hash128,
 
     line_map: OnceLock<Arc<LSPLineMap>>,
@@ -53,8 +57,14 @@ pub struct FileBase {
 }
 
 impl FileBase {
-    pub(crate) fn new(file_name: String, content: String, hash: Hash128) -> FileBase {
-        FileBase { file_name, content, hash, line_map: OnceLock::new(), line_info: OnceLock::new() }
+    pub(crate) fn new(file_name: String, content: impl Into<Arc<str>>, hash: Hash128) -> FileBase {
+        FileBase {
+            file_name,
+            content: content.into(),
+            hash,
+            line_map: OnceLock::new(),
+            line_info: OnceLock::new(),
+        }
     }
 
     // overlayfs.go:49
@@ -71,7 +81,7 @@ impl FileBase {
     fn ecma_line_info(&self) -> Arc<ECMALineInfo> {
         Arc::clone(self.line_info.get_or_init(|| {
             let line_starts = compute_ecma_line_starts(&self.content);
-            create_ecma_line_info(self.content.clone(), line_starts)
+            create_ecma_line_info(self.content.to_string(), line_starts)
         }))
     }
 }
@@ -104,6 +114,10 @@ impl FileContent for CachedFile {
     // overlayfs.go:57
     fn content(&self) -> &str {
         &self.base.content
+    }
+
+    fn shared_content(&self) -> Arc<str> {
+        Arc::clone(&self.base.content)
     }
 
     // overlayfs.go:53
@@ -153,7 +167,7 @@ impl crate::dirty::Cloneable for CachedFile {
             realpath_path: self.realpath_path.clone(),
             base: FileBase::new(
                 self.base.file_name.clone(),
-                self.base.content.clone(),
+                Arc::clone(&self.base.content),
                 self.base.hash,
             ),
             needs_reload: false,
@@ -161,6 +175,7 @@ impl crate::dirty::Cloneable for CachedFile {
     }
 }
 
+#[derive(Clone)]
 pub struct Overlay {
     pub(crate) base: FileBase,
     version: i32,
@@ -221,6 +236,10 @@ impl Overlay {
 }
 
 impl FileContent for Overlay {
+    fn shared_content(&self) -> Arc<str> {
+        Arc::clone(&self.base.content)
+    }
+
     fn content(&self) -> &str {
         &self.base.content
     }
@@ -768,12 +787,7 @@ impl OverlayFS {
                         let (matches_disk_text, _) =
                             existing.compute_matches_disk_text(self.host.fs());
                         if matches_disk_text != existing.matches_disk_text() {
-                            let mut updated = new_overlay(
-                                existing.base.file_name.clone(),
-                                existing.content().to_string(),
-                                existing.version(),
-                                existing.kind,
-                            );
+                            let mut updated = (**existing).clone();
                             updated.matches_disk_text = matches_disk_text;
                             let updated = Arc::new(updated);
                             new_overlays.insert(path.clone(), Arc::clone(&updated));
@@ -825,17 +839,10 @@ impl OverlayFS {
                             ));
                         }
                     }
-                    // Go then sets version, hash and matchesDiskText on that overlay in place.
                     if !change.changes.is_empty() {
-                        let mut next = new_overlay(
-                            current.base.file_name.clone(),
-                            current.base.content.clone(),
-                            change.version,
-                            current.kind,
-                        );
-                        next.base.hash = hash_string_128(&next.base.content);
+                        let next = Arc::make_mut(&mut current);
+                        next.version = change.version;
                         next.matches_disk_text = false;
-                        current = Arc::new(next);
                         new_overlays.insert(path.clone(), Arc::clone(&current));
                     }
                     o = Some(current);
@@ -844,12 +851,7 @@ impl OverlayFS {
 
             if events.saved {
                 if let Some(existing) = &o {
-                    let mut updated = new_overlay(
-                        existing.base.file_name.clone(),
-                        existing.content().to_string(),
-                        existing.version(),
-                        existing.kind,
-                    );
+                    let mut updated = (**existing).clone();
                     updated.matches_disk_text = true;
                     let updated = Arc::new(updated);
                     new_overlays.insert(path.clone(), Arc::clone(&updated));

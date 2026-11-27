@@ -14,7 +14,7 @@ use crate::dirty::{
 };
 use crate::filechange::{FileChangeExpander, FileChangeSummary};
 use crate::overlayfs::{
-    CachedFile, FileHandle, LayeredFileSystem, OverlayMap, ToPath, hash_string_128, new_cached_file,
+    CachedFile, FileHandle, LayeredFileSystem, OverlayMap, ToPath, hash_string_128,
 };
 
 pub trait FileHandleSource {
@@ -430,8 +430,14 @@ impl SnapshotFSBuilder {
         path: &Path,
         source: &dyn FileHandle,
     ) -> Option<Arc<dyn FileHandle>> {
-        let mut file = new_cached_file(file_name.to_string(), source.content().to_string());
-        file.base.hash = source.hash();
+        let file = CachedFile {
+            base: crate::overlayfs::FileBase::new(
+                file_name.to_owned(),
+                source.shared_content(),
+                source.hash(),
+            ),
+            ..Default::default()
+        };
         let (entry, loaded) = self.cache_files.load_or_store(path.clone(), Shared::new(file));
         let entry = entry?;
         if !loaded && path.contains("/node_modules/") {
@@ -510,7 +516,7 @@ impl SnapshotFSBuilder {
             return None;
         }
         // Read file outside the lock to avoid blocking other goroutines.
-        let content = self.fs.read_file(&file_name);
+        let content = self.fs.read_file(&file_name).map(Arc::<str>::from);
         entry.locked(&mut |e: &dyn Value<CachedFile>| {
             if e.value().is_none() {
                 return;
@@ -519,7 +525,7 @@ impl SnapshotFSBuilder {
                 e.change(&mut |file: &mut CachedFile| {
                     file.base = crate::overlayfs::FileBase::new(
                         file.base.file_name.clone(),
-                        content.clone(),
+                        Arc::clone(content),
                         hash_string_128(content),
                     );
                     file.needs_reload = false;
@@ -546,7 +552,7 @@ impl SnapshotFSBuilder {
         });
         if !file_name.is_empty() {
             // Read file outside the lock to avoid blocking other goroutines.
-            let content = self.fs.read_file(&file_name);
+            let content = self.fs.read_file(&file_name).map(Arc::<str>::from);
             entry.locked(&mut |e: &dyn Value<CachedFile>| {
                 match e.value() {
                     None => return,
@@ -557,7 +563,7 @@ impl SnapshotFSBuilder {
                     e.change(&mut |file: &mut CachedFile| {
                         file.base = crate::overlayfs::FileBase::new(
                             file.base.file_name.clone(),
-                            content.clone(),
+                            Arc::clone(content),
                             hash_string_128(content),
                         );
                         file.needs_reload = false;
@@ -682,7 +688,7 @@ impl SnapshotFSBuilder {
         let Some(file) = entry.value() else {
             return true;
         };
-        let content = self.fs.read_file(&file.base.file_name);
+        let content = self.fs.read_file(&file.base.file_name).map(Arc::<str>::from);
         let mut changed = true;
         entry.locked(&mut |e: &dyn Value<CachedFile>| {
             let Some(cur) = e.value() else {
@@ -692,7 +698,7 @@ impl SnapshotFSBuilder {
                 e.delete();
                 return;
             };
-            if *content == cur.base.content {
+            if content.as_ref() == cur.base.content.as_ref() {
                 changed = false;
                 if !cur.matches_disk_text() {
                     e.change(&mut |file: &mut CachedFile| {
@@ -704,7 +710,7 @@ impl SnapshotFSBuilder {
             e.change(&mut |file: &mut CachedFile| {
                 file.base = crate::overlayfs::FileBase::new(
                     file.base.file_name.clone(),
-                    content.clone(),
+                    Arc::clone(content),
                     hash_string_128(content),
                 );
                 file.needs_reload = false;

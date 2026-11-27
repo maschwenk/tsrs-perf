@@ -13,12 +13,13 @@
 // live as long as a snapshot or a language service refers to them), so it is dropped exactly when nothing can reach
 // the program any more. Dropping it frees the checkers and their regions, the `Program` itself, then the regions.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tsrs_compiler::Program;
 use tsrs_core::arena::Region;
 
 use crate::checkerpool::CheckerPoolImpl;
+use crate::parsecache::SharedParseRefs;
 
 pub struct ProgramOwner {
     program: &'static Program,
@@ -27,6 +28,7 @@ pub struct ProgramOwner {
     region: Region,
     pub(crate) base: Region,
     files: Vec<Region>,
+    pub(crate) parse_refs: Mutex<SharedParseRefs>,
 }
 
 impl ProgramOwner {
@@ -38,6 +40,7 @@ impl ProgramOwner {
         region: Region,
         base: Region,
         full_build: bool,
+        parse_refs: SharedParseRefs,
     ) -> ProgramOwner {
         if full_build {
             base.adopt_owner(processed_files_addr(program));
@@ -61,7 +64,14 @@ impl ProgramOwner {
                 base.allocated_bytes() >> 10
             )
         });
-        ProgramOwner { program, checker_pool, region, base, files }
+        ProgramOwner {
+            program,
+            checker_pool,
+            region,
+            base,
+            files,
+            parse_refs: Mutex::new(parse_refs),
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use bitflags::bitflags;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -318,15 +318,44 @@ pub fn parse_source_file_embedded(
     }
 }
 
+/// Parses a snapshot file using its immutable text buffer. The active region retains an owner
+/// for as long as any of its nodes can refer to the text.
+pub fn parse_source_file_shared(
+    opts: SourceFileParseOptions,
+    source_text: Arc<str>,
+    script_kind: ScriptKind,
+) -> P<SourceFile> {
+    let region = tsrs_core::arena::current_region().expect("shared source requires a file region");
+    parse_source_file_registered(
+        opts,
+        tsrs_core::arena::retain_source_text(source_text),
+        script_kind,
+        Some(&region),
+    )
+}
+
 fn parse_source_file_static(
     opts: SourceFileParseOptions,
     source_text: &'static str,
     script_kind: ScriptKind,
 ) -> P<SourceFile> {
+    parse_source_file_registered(opts, source_text, script_kind, None)
+}
+
+fn parse_source_file_registered(
+    opts: SourceFileParseOptions,
+    source_text: &'static str,
+    script_kind: ScriptKind,
+    region: Option<&tsrs_core::arena::Region>,
+) -> P<SourceFile> {
     crate::jsdoc::init();
     let mut p = new_parser();
     p.initialize_state_static(opts, source_text, script_kind);
     p.source_text_index = ast::register_source_text(source_text);
+    if let Some(region) = region {
+        let index = p.source_text_index;
+        region.on_free(Box::new(move || ast::unregister_source_text(index)));
+    }
     p.next_token();
     if p.script_kind == ScriptKind::JSON {
         return p.parse_json_text();

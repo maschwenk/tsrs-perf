@@ -25,8 +25,9 @@ use crate::dirty::Cloneable;
 use crate::logging::LogTree;
 use crate::memregions::ProgramOwner;
 use crate::parsecache::{
-    content_mapped_parse_cache_key_for_duplicate, content_mapped_parse_cache_key_for_file,
-    parse_cache_key_for_duplicate, parse_cache_key_for_file,
+    SharedParseRefs, content_mapped_parse_cache_key_for_duplicate,
+    content_mapped_parse_cache_key_for_file, parse_cache_key_for_duplicate,
+    parse_cache_key_for_file,
 };
 use crate::projectcollectionbuilder::ProjectCollectionBuilder;
 use crate::snapshot::{ModuleResolverFactory, ProjectTreeRequest};
@@ -603,6 +604,7 @@ impl Project {
         let host = self.host.clone().unwrap();
         let mut update_kind = ProgramUpdateKind::NewFiles;
         let mut program_cloned = false;
+        let mut parse_refs = SharedParseRefs::default();
         let new_program_result: &'static Program;
 
         let pool_slot: Arc<Mutex<Option<Arc<CheckerPoolImpl>>>> = Arc::new(Mutex::new(None));
@@ -653,7 +655,17 @@ impl Project {
             let content_mapped_parse_cache = host.builder_content_mapped_parse_cache();
             if program_cloned {
                 update_kind = ProgramUpdateKind::Cloned;
-                for &file in new_program_result.source_files() {
+                let previous = self
+                    .program_owner
+                    .as_ref()
+                    .map_or_default(|owner| owner.parse_refs.lock().unwrap().clone());
+                parse_refs = previous.for_clone(
+                    &parse_cache,
+                    old_program.source_files(),
+                    new_program_result.source_files(),
+                    dirty_file,
+                );
+                for file in parse_refs.individual_files(new_program_result.source_files()) {
                     // Use pointer identity: dirtyFile is the exact instance UpdateProgram acquired,
                     // and it is the only file whose refcount is already accounted for.
                     if Some(file) != dirty_file
@@ -735,6 +747,7 @@ impl Project {
             region,
             base,
             !program_cloned,
+            parse_refs,
         ));
         if let Some(pool) = &checker_pool {
             pool.set_owner(Arc::downgrade(&owner));
