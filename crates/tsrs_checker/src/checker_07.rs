@@ -1966,6 +1966,13 @@ impl Checker {
         }
     }
 
+    /// A completed CLI worker with no pending global work can leave the final global sweep.
+    pub fn can_finish_without_global_diagnostics(&self) -> bool {
+        !self.was_canceled()
+            && self.deferred_diagnostic_callbacks.is_empty()
+            && !self.diagnostics.has_global_diagnostics()
+    }
+
     // checker.go:14204
     pub fn get_global_diagnostics(&mut self) -> Vec<P<Diagnostic>> {
         self.check_not_canceled();
