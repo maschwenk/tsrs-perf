@@ -25,6 +25,8 @@ pub struct TextWriter {
     line_start: bool,
     line_count: u32,
     line_pos: u32,
+    // Number of UTF-8 bytes in the current line in excess of its UTF-16 code units.
+    utf16_byte_excess: usize,
     has_trailing_comment_state: bool,
 }
 
@@ -53,9 +55,17 @@ impl TextWriter {
             let cur_len = self.builder.len() as u32;
             self.line_pos = cur_len - s.len() as u32 + last_line_start;
             self.line_start = self.line_pos == cur_len;
-            return;
+            self.utf16_byte_excess = 0;
+        } else {
+            self.line_start = false;
         }
-        self.line_start = false;
+        // A single write can exceed the line map's u32 offsets. Column reads on an oversized
+        // buffer use the original scan, so a wrapped offset need not be a character boundary.
+        if let Some(tail) = s.get(last_line_start as usize..)
+            && !tail.is_ascii()
+        {
+            self.utf16_byte_excess += tail.len() - tail.encode_utf16().count();
+        }
     }
 
     fn write_text(&mut self, s: &str) {
@@ -78,6 +88,7 @@ impl TextWriter {
         self.new_line = nl;
         self.line_count += 1;
         self.line_pos = self.builder.len() as u32;
+        self.utf16_byte_excess = 0;
         self.line_start = true;
         self.has_trailing_comment_state = false;
     }
@@ -107,9 +118,11 @@ impl EmitTextWriter for TextWriter {
         if self.line_start {
             return self.indent * self.indent_size as u32;
         }
-        // Count UTF-16 code units from the last line start.
-        // For ASCII-only output (the common case), this equals the byte count.
-        utf16_len(&self.builder[self.line_pos as usize..])
+        let line = &self.builder[self.line_pos as usize..];
+        if self.builder.len() > u32::MAX as usize {
+            return utf16_len(line);
+        }
+        (line.len() - self.utf16_byte_excess) as UTF16Offset
     }
 
     fn get_indent(&self) -> u32 {
