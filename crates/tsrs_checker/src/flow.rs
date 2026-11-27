@@ -117,6 +117,39 @@ impl Checker {
         self.get_flow_type_of_reference_ex(reference, declared_type, declared_type, None, None)
     }
 
+    // Fast scheduling can visit a default library after a user's top-level flow depth limit.
+    // Its computed member names still need their unique-symbol types. A terminal Start has
+    // no predecessors or enclosing flow to traverse. Keep Go's bailout for every other walk.
+    fn can_resolve_library_name_after_flow_limit(
+        &self,
+        reference: P<Node>,
+        flow: Option<P<FlowNode>>,
+    ) -> bool {
+        if tsrs_core::compat::go_compatible_history()
+            || !flow.is_some_and(|f| f.flags().intersects(FlowFlags::Start) && f.node().is_none())
+        {
+            return false;
+        }
+        let access = match reference.kind() {
+            Kind::PropertyAccessExpression => reference,
+            Kind::Identifier => match reference.parent() {
+                Some(p)
+                    if ast::is_property_access_expression(p)
+                        && p.expression() == Some(reference) =>
+                {
+                    p
+                }
+                _ => return false,
+            },
+            _ => return false,
+        };
+        access.expression().is_some_and(ast::is_identifier)
+            && access.parent().is_some_and(ast::is_computed_property_name)
+            && ast::get_source_file_of_node(access).is_some_and(|f| {
+                f.is_declaration_file() && self.program.is_source_file_default_library(f.path())
+            })
+    }
+
     // flow.go:81
     pub(crate) fn get_flow_type_of_reference_ex(
         &mut self,
@@ -126,16 +159,13 @@ impl Checker {
         flow_container: Option<P<Node>>,
         flow_node: Option<P<FlowNode>>,
     ) -> P<Type> {
-        if self.flow_analysis_disabled {
+        let flow_node = flow_node.or_else(|| get_flow_node_of_node(reference));
+        if self.flow_analysis_disabled
+            && !self.can_resolve_library_name_after_flow_limit(reference, flow_node)
+        {
             return self.error_type;
         }
-        let flow_node = match flow_node {
-            Some(flow_node) => flow_node,
-            None => match get_flow_node_of_node(reference) {
-                Some(flow_node) => flow_node,
-                None => return declared_type,
-            },
-        };
+        let Some(flow_node) = flow_node else { return declared_type };
         let f = self.get_flow_state();
         f.reference.set(Some(reference));
         f.declared_type.set(Some(declared_type));
