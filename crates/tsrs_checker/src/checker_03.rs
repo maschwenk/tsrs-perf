@@ -381,7 +381,12 @@ impl Checker {
                     .object_flags
                     .set(result.object_flags.get_lazy() | ObjectFlags::MembersResolved);
                 result.as_object_type().set_members(resolved.members());
-                result.as_object_type().set_properties(resolved.properties());
+                if let Some(properties) = resolved.raw_properties() {
+                    result.as_object_type().set_properties(properties);
+                } else {
+                    result.as_object_type().clear_properties();
+                }
+                result.as_object_type().set_lazy(t.member_slots());
                 return result;
             }
         } else if t.flags().intersects(TypeFlags::Intersection) {

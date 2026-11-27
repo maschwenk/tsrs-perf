@@ -1408,7 +1408,7 @@ impl Checker {
     #[inline(never)]
     fn is_empty_anonymous_object_type_worker(&mut self, t: P<Type>) -> bool {
         if t.object_flags_lazy().intersects(ObjectFlags::MembersResolved) {
-            if self.is_empty_resolved_type(t.as_structured_type()) {
+            if self.is_empty_resolved_type(t) {
                 return true;
             }
         } else {
@@ -1425,29 +1425,17 @@ impl Checker {
         false
     }
 
-    // isEmptyResolvedType(resolveStructuredTypeMembers(t)); notes/mem-lazy.md L11: a type with a lazy member table
-    // (an instantiated reference, never anyFunctionType) is asked without resolving it.
-    fn is_empty_structured_type(&mut self, t: P<Type>) -> bool {
-        if self.lazy_empty
-            && let Some(lm) = self.get_ready_lazy_member_table(t)
-        {
-            self.lazy_member_stats.empty_lazy_queries += 1;
-            let ready = lm.ready.get().unwrap();
-            return ready.call_signatures.get().is_empty()
-                && ready.construct_signatures.get().is_empty()
-                && ready.index_infos.get().is_empty()
-                && !self.has_properties_of_structured_type(t);
-        }
-        let resolved = self.resolve_structured_type_members(t);
-        self.is_empty_resolved_type(resolved)
+    pub(crate) fn is_empty_structured_type(&mut self, t: P<Type>) -> bool {
+        self.resolve_structured_type_members(t);
+        self.is_empty_resolved_type(t)
     }
 
     // checker.go:26951
-    fn is_empty_resolved_type(&self, t: &'static StructuredType) -> bool {
-        !std::ptr::eq(t, self.any_function_type.as_structured_type())
-            && t.properties().is_empty()
-            && t.signatures().is_empty()
-            && t.index_infos().is_empty()
+    pub(crate) fn is_empty_resolved_type(&self, t: P<Type>) -> bool {
+        t != self.any_function_type
+            && Self::property_count_of_structured_type(t) == 0
+            && t.as_structured_type().signatures().is_empty()
+            && t.as_structured_type().index_infos().is_empty()
     }
 
     // checker.go:26955
@@ -2956,9 +2944,8 @@ impl Checker {
                         ));
                         return Some(self.undefined_type);
                     } else if index_type.flags().intersects(TypeFlags::Number | TypeFlags::String) {
-                        let mut types: Vec<P<Type>> = object_type
-                            .as_structured_type()
-                            .properties()
+                        let mut types: Vec<P<Type>> = self
+                            .properties_of_structured_type(object_type)
                             .iter()
                             .map(|&prop| self.get_type_of_symbol(prop))
                             .collect();
@@ -3391,7 +3378,7 @@ impl Checker {
     pub(crate) fn is_string_index_signature_only_type_worker(&mut self, t: P<Type>) -> bool {
         t.flags().intersects(TypeFlags::Object)
             && !self.is_generic_mapped_type(t)
-            && !self.has_properties_of_structured_type(t)
+            && self.get_property_count_of_type(t) == 0
             && self.get_index_infos_of_type(t).len() == 1
             && {
                 let string_type = self.string_type;

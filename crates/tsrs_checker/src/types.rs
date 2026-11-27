@@ -1639,6 +1639,15 @@ impl Type {
         self.data().as_type_reference()
     }
     #[inline]
+    pub(crate) fn member_slots(&self) -> Option<P<crate::checker_09::SharedMemberSlots>> {
+        if let Some(reference) = self.try_as_type_reference() {
+            reference.member_slots.get()
+        } else {
+            self.try_as_structured_type()?.lazy()
+        }
+    }
+
+    #[inline]
     pub fn try_as_interface_type(&self) -> Option<&'static InterfaceType> {
         self.data().as_interface_type()
     }
@@ -2079,15 +2088,17 @@ pub struct ConstrainedType {
 // list reads as `&[]` until a non-empty one is set, see `CountOrIndexInfos`).
 #[derive(Default)]
 pub struct StructuredType {
-    resolved: OvCell<Option<P<StructuredMembers>>>,
+    resolved: OvExact<Option<P<StructuredMembers>>>,
     // Go's objectTypeWithoutAbstractConstructSignatures is `Checker::object_types_without_abstract_construct_signatures`.
 }
 
 #[derive(Default)]
 struct StructuredMembers {
     members: Cell<Option<P<SymbolTable>>>,
+    // Nil while `lazy` supplies the members; Some(empty) is a resolved empty property list.
+    properties: OptionThinSliceCell<P<Symbol>>,
+    lazy: Cell<Option<P<crate::checker_09::SharedMemberSlots>>>,
     // `ThinSliceCell`s are one word each (`tsrs_core::ThinSlice`).
-    properties: ThinSliceCell<P<Symbol>>,
     signatures: ThinSliceCell<P<Signature>>, // Signatures (call + construct)
     // Count of call signatures, and index infos (2% of the resolved types on the private monorepo have any).
     count_or_index_infos: CountOrIndexInfos,
@@ -2100,9 +2111,11 @@ const _: () = assert!(
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(std::mem::size_of::<StructuredType>() == 4);
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<StructuredMembers>() == 32);
+const _: () = assert!(
+    std::mem::size_of::<StructuredMembers>() == if tsrs_core::COMPRESSED_PTRS { 32 } else { 40 }
+);
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(std::mem::size_of::<StructuredMembers>() == 24);
+const _: () = assert!(std::mem::size_of::<StructuredMembers>() == 28);
 
 /// Go's `CallSignatureCount` and `IndexInfos` in one word: `count << 1 | 1` while no non-empty index info list was
 /// set (the list reads empty, `&[]`), else a pointer to an `IndexInfosTail` holding both.
@@ -2160,16 +2173,37 @@ impl CountOrIndexInfos {
     }
 }
 
+impl StructuredMembers {
+    /// A fork can resolve an inherited type again after circularity or late binding. Its new member table,
+    /// signature counts, and index-info tail must all belong to that fork.
+    #[cold]
+    fn copy_for_fork(&self) -> Self {
+        let copy = Self::default();
+        copy.members.set(self.members.get());
+        copy.properties.set(self.properties.get());
+        copy.lazy.set(self.lazy.get());
+        copy.signatures.set(self.signatures.get());
+        copy.count_or_index_infos
+            .set_call_signature_count(self.count_or_index_infos.call_signature_count());
+        copy.count_or_index_infos.set_index_infos(self.count_or_index_infos.index_infos());
+        copy
+    }
+}
+
 impl StructuredType {
     #[inline]
     fn resolved_for_write(&self) -> P<StructuredMembers> {
-        if let Some(resolved) = self.resolved.get() {
-            resolved
+        let members = if let Some(resolved) = self.resolved.get() {
+            if !tsrs_core::sharedgraph::frozen(resolved.get()) {
+                return resolved;
+            }
+            resolved.copy_for_fork()
         } else {
-            let resolved = P::new(StructuredMembers::default());
-            self.resolved.set(Some(resolved));
-            resolved
-        }
+            StructuredMembers::default()
+        };
+        let members = P::new(members);
+        self.resolved.set(Some(members));
+        members
     }
 
     #[inline]
@@ -2182,11 +2216,31 @@ impl StructuredType {
     }
     #[inline]
     pub fn properties(&self) -> &'static [P<Symbol>] {
-        self.resolved.get().map_or(&[], |r| r.properties.get())
+        self.raw_properties().unwrap_or(&[])
     }
     #[inline]
-    pub(crate) fn set_properties(&self, properties: &'static [P<Symbol>]) {
-        self.resolved_for_write().properties.set(properties);
+    pub(crate) fn has_member_storage(&self) -> bool {
+        self.resolved.get().is_some()
+    }
+    #[inline]
+    pub(crate) fn raw_properties(&self) -> Option<&'static [P<Symbol>]> {
+        self.resolved.get()?.properties.get()
+    }
+    #[inline]
+    pub fn set_properties(&self, properties: &'static [P<Symbol>]) {
+        self.resolved_for_write().properties.set(Some(properties));
+    }
+    #[inline]
+    pub(crate) fn clear_properties(&self) {
+        self.resolved_for_write().properties.set(None);
+    }
+    #[inline]
+    pub(crate) fn lazy(&self) -> Option<P<crate::checker_09::SharedMemberSlots>> {
+        self.resolved.get()?.lazy.get()
+    }
+    #[inline]
+    pub(crate) fn set_lazy(&self, lazy: Option<P<crate::checker_09::SharedMemberSlots>>) {
+        self.resolved_for_write().lazy.set(lazy);
     }
     /// Call signatures followed by construct signatures.
     #[inline]
@@ -2283,6 +2337,7 @@ pub struct TypeReference {
     object_type: ObjectType,
     pub(crate) node: Cell<Option<P<Node>>>, // TypeReferenceNode | ArrayTypeNode | TupleTypeNode when deferred, else nil
     pub(crate) resolved_type_arguments: OvOptionThinSliceCell<P<Type>>, // nil = not computed (Go tests against nil)
+    pub(crate) member_slots: OvExact<Option<P<crate::checker_09::SharedMemberSlots>>>,
 }
 embeds!(TypeReference, object_type, ObjectType);
 
@@ -2360,7 +2415,7 @@ impl ReferenceInstantiations {
 pub struct InterfaceType {
     type_reference: TypeReference,
     pub(crate) all_type_parameters: Cell<&'static [P<Type>]>, // Type parameters (outer + local + thisType)
-    pub(crate) resolved_base_types: OvCell<&'static [P<Type>]>,
+    pub(crate) resolved_base_types: OvExact<&'static [P<Type>]>,
     pub(crate) declared_call_signatures: OvCell<&'static [P<Signature>]>, // Declared call signatures
     pub(crate) declared_construct_signatures: OvCell<&'static [P<Signature>]>, // Declared construct signatures
     pub(crate) declared_index_infos: OvCell<&'static [P<IndexInfo>]>, // Declared index signatures
@@ -2369,8 +2424,10 @@ pub struct InterfaceType {
     pub(crate) resolved_base_constructor_type: OvCell<Option<P<Type>>>,
     pub(crate) declared_members: OvCell<Option<P<SymbolTable>>>, // Declared members
     pub(crate) instantiations: ReferenceInstantiations, // Map of type instantiations (Go: in ObjectType)
-    pub(crate) base_types_resolved: OvCell<bool>,
+    pub(crate) base_types_resolved: OvExact<bool>,
     pub(crate) declared_members_resolved: OvCell<bool>,
+    // A fork may invalidate its inherited layout while resolving circular bases.
+    pub(crate) member_layout: OvExact<Option<P<crate::checker_09::MemberLayout>>>,
 }
 embeds!(InterfaceType, type_reference, TypeReference);
 

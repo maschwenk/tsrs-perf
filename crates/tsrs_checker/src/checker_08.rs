@@ -1698,6 +1698,10 @@ impl Checker {
                 early_symbols = Some(self.get_exports_of_module_worker(Some(symbol)).0);
             }
             links[kind].set(early_symbols);
+            let track_layout = !is_static && self.lazy_members;
+            if track_layout {
+                self.resolving_layout_symbols.push(symbol);
+            }
             // fill in any as-yet-unresolved late-bound members.
             let mut late_symbols: Option<P<SymbolTable>> = None;
             let declarations = symbol.declarations();
@@ -1713,6 +1717,9 @@ impl Checker {
                         }
                     }
                 }
+            }
+            if track_layout {
+                self.resolving_layout_symbols.pop();
             }
             if is_static
                 && let Some(assignment_symbol) = symbol

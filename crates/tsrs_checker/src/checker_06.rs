@@ -91,9 +91,10 @@ fn get_instantiated_type_part(
                 ObjectFlags::Anonymous | ObjectFlags::InstantiationExpressionType,
                 Some(symbol),
             );
+            let members = c.members_of_structured_type(t);
             c.set_structured_type_members(
                 result,
-                resolved.members(),
+                members,
                 &call_signatures,
                 &construct_signatures,
                 resolved.index_infos(),

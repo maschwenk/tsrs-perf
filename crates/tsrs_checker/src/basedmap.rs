@@ -69,6 +69,7 @@ impl<K: Hash + Eq + Clone, V> Based<FxHashMap<K, V>, K> {
         b.get(key)
     }
 
+    #[cfg(feature = "site-counts")]
     #[inline]
     pub(crate) fn contains_key(&self, key: &K) -> bool {
         self.get(key).is_some()

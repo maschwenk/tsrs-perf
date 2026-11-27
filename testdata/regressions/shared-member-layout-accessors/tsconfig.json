@@ -1,0 +1,4 @@
+{
+  "compilerOptions": { "strict": true, "skipLibCheck": true, "noEmit": true, "types": [], "lib": ["es5"] },
+  "files": ["model.d.ts", "use.ts"]
+}

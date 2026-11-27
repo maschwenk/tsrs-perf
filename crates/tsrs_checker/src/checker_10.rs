@@ -188,25 +188,27 @@ impl Checker {
         kind: SignatureKind,
         allow_members: bool,
     ) -> Option<P<Signature>> {
-        if t.flags().intersects(TypeFlags::Object)
-            && (allow_members
-                || !self.has_properties_of_structured_type(t)
-                    && self.index_infos_of_structured_type(t).is_empty())
-        {
-            let call_signatures = self.signatures_of_structured_type(t, SignatureKind::Call);
-            let construct_signatures =
-                self.signatures_of_structured_type(t, SignatureKind::Construct);
-            if kind == SignatureKind::Call
-                && call_signatures.len() == 1
-                && construct_signatures.is_empty()
+        if t.flags().intersects(TypeFlags::Object) {
+            self.resolve_structured_type_members(t);
+            if allow_members
+                || Self::property_count_of_structured_type(t) == 0
+                    && self.index_infos_of_structured_type(t).is_empty()
             {
-                return Some(call_signatures[0]);
-            }
-            if kind == SignatureKind::Construct
-                && construct_signatures.len() == 1
-                && call_signatures.is_empty()
-            {
-                return Some(construct_signatures[0]);
+                let call_signatures = self.signatures_of_structured_type(t, SignatureKind::Call);
+                let construct_signatures =
+                    self.signatures_of_structured_type(t, SignatureKind::Construct);
+                if kind == SignatureKind::Call
+                    && call_signatures.len() == 1
+                    && construct_signatures.is_empty()
+                {
+                    return Some(call_signatures[0]);
+                }
+                if kind == SignatureKind::Construct
+                    && construct_signatures.len() == 1
+                    && call_signatures.is_empty()
+                {
+                    return Some(construct_signatures[0]);
+                }
             }
         }
         None
@@ -2216,7 +2218,7 @@ impl Checker {
             }
             if symbol.flags().intersects(SymbolFlags::Enum)
                 && (self.get_declared_type_of_symbol(symbol).flags().intersects(TypeFlags::Enum)
-                    || d.properties().iter().any(|prop| {
+                    || self.properties_of_structured_type(t).iter().any(|prop| {
                         self.get_type_of_symbol(*prop).flags().intersects(TypeFlags::NumberLike)
                     }))
             {
@@ -3727,8 +3729,7 @@ impl Checker {
         key: HashedName<'_>,
     ) -> Option<P<Symbol>> {
         if t.flags().intersects(TypeFlags::Object) {
-            let resolved = self.resolve_structured_type_members(t);
-            let symbol = resolved.members().and_then(|m| m.lookup_hashed(key));
+            let symbol = self.get_member_of_structured_type_hashed(t, key);
             if let Some(symbol) = symbol
                 && self.symbol_is_value(symbol)
             {

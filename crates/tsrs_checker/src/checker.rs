@@ -1126,6 +1126,11 @@ pub struct Checker {
     pub(crate) too_complex_reported: rustc_hash::FxHashSet<(P<SourceFile>, u64)>,
     /// Calls of `check_expression_ex`, each of which resets `instantiation_count` (wrapping; the inference memo).
     pub(crate) expression_checks: u32,
+    /// Symbols whose live instance member tables can change while a computed name is checked.
+    pub(crate) resolving_layout_symbols: Vec<P<Symbol>>,
+    pub(crate) alternate_member_layouts: Vec<Option<(P<Type>, P<crate::checker_09::MemberLayout>)>>,
+    pub(crate) layout_entries: Vec<crate::checker_09::LayoutEntry>,
+    pub(crate) layout_index: FxHashMap<&'static str, usize>,
     pub(crate) instantiation_stack: Vec<P<Type>>,
     pub(crate) conditional_constraint_depth: u32,
     pub(crate) inline_level: u32,
@@ -1250,11 +1255,6 @@ pub struct Checker {
     pub(crate) source_file_links: LinkStore<SourceFile, SourceFileLinks>,
     pub(crate) reg_exp_scanner: Option<Box<Scanner>>,
     pub(crate) pattern_for_type: FxHashMap<P<Type>, P<Node>>,
-    pub(crate) lazy_member_tables:
-        crate::basedmap::Based<FxHashMap<P<Type>, P<LazyMemberTable>>, P<Type>>,
-    /// Per generic target, what `prepare_lazy_members` learned about its declared members for good
-    /// (`lazy_unaffected_members`).
-    pub(crate) lazy_unaffected: FxHashMap<P<Type>, crate::checker_09::LazyUnaffected>,
     // Go `StructuredType.objectTypeWithoutAbstractConstructSignatures`: set only by the node builder, for few types,
     // so kept here instead of in every object, union and intersection type.
     pub(crate) object_types_without_abstract_construct_signatures: FxHashMap<P<Type>, P<Type>>,
@@ -1268,6 +1268,7 @@ pub struct Checker {
     /// `tsrs_core::lazymembers::enabled()` (`--fast` / `--lazyMembers`; `TSRS_LAZY_MEMBERS` overrides the preset): no lazy
     /// table is created when false.
     pub(crate) lazy_members: bool,
+    pub(crate) lazy_tuples: bool,
     /// Counter for mapped types whose members are being resolved (see `resolve_mapped_type_members`).
     /// Used to avoid shortcuts that would bypass the empty-members guard on recursive resolution.
     pub(crate) mapped_types_resolving: u32,
@@ -1275,8 +1276,6 @@ pub struct Checker {
     /// stack's kept recursion identities, and the kept identities are recomputed; any difference panics
     /// (`relater_1.rs`).
     pub(crate) deep_nested_shadow: bool,
-    /// notes/mem-lazy.md L1: tuple references get lazy member tables too.
-    pub(crate) lazy_tuples: bool,
     /// site-counts profile: creation site of each instantiated symbol until its type is resolved.
     #[cfg(feature = "site-counts")]
     pub(crate) inst_symbol_sites: FxHashMap<P<Symbol>, &'static std::panic::Location<'static>>,
@@ -1284,12 +1283,6 @@ pub struct Checker {
     pub(crate) lazy_cond_mapper: bool,
     /// notes/mem-lazy.md L6: union/intersection property caches without the eager copy.
     pub(crate) lazy_prop_cache: bool,
-    /// notes/mem-lazy.md L9: existence-only property queries in getUnmatchedProperties.
-    pub(crate) lazy_has_prop: bool,
-    /// notes/mem-lazy.md L10: getUnmatchedProperties walks lazy targets.
-    pub(crate) lazy_unmatched: bool,
-    /// notes/mem-lazy.md L11: empty-object tests on lazy tables.
-    pub(crate) lazy_empty: bool,
     pub lazy_member_stats: tsrs_core::lazymembers::LazyMemberStats,
     /// The member names of `Function`, `CallableFunction`, `NewableFunction` and `Object`, once all four are
     /// resolved (`may_be_augment_member`).
@@ -1570,7 +1563,6 @@ pub struct Checker {
     pub(crate) free_type_mapper_caches: Vec<PackedMap<CacheHashKey, P<Type>>>, // Rust-only: cleared maps for reuse (Go keeps them in the slice capacity)
     pub(crate) free_type_lists: Vec<Vec<P<Type>>>, // Rust-only: empty buffers for `instantiate_types_changed`
     pub(crate) free_strings: Vec<String>, // Rust-only: empty buffers for text built and dropped in one call
-    pub(crate) free_name_sets: Vec<FxHashSet<&'static str>>, // Rust-only: empty sets for names seen during one walk
     pub(crate) ambient_modules_once: bool, // Go sync.Once: true once ambient_modules has been computed
     pub(crate) ambient_modules: Vec<P<Symbol>>,
     pub(crate) within_unreachable_code: bool,
@@ -1648,6 +1640,10 @@ pub fn new_checker(program: &'static dyn Program) -> Box<Checker> {
         too_complex_reported: rustc_hash::FxHashSet::default(),
         expression_checks: 0,
         instantiation_stack: Vec::new(),
+        resolving_layout_symbols: Vec::new(),
+        alternate_member_layouts: Vec::new(),
+        layout_entries: Vec::new(),
+        layout_index: FxHashMap::default(),
         conditional_constraint_depth: 0,
         inline_level: 0,
         serialization_level: 0,
@@ -1766,23 +1762,18 @@ pub fn new_checker(program: &'static dyn Program) -> Box<Checker> {
         source_file_links: LinkStore::default(),
         reg_exp_scanner: None,
         pattern_for_type: FxHashMap::default(),
-        lazy_member_tables: crate::basedmap::Based::default(),
-        lazy_unaffected: FxHashMap::default(),
         object_types_without_abstract_construct_signatures: FxHashMap::default(),
         structured_type_base_constraints: FxHashMap::default(),
         object_type_instantiations: crate::basedmap::Based::default(),
         lazy_mapped_tables: crate::basedmap::Based::default(),
         lazy_members: tsrs_core::lazymembers::enabled(),
+        lazy_tuples: tsrs_core::lazymembers::lazy_tuples(),
         mapped_types_resolving: 0,
         deep_nested_shadow: std::env::var("TSRS_DEEP_NESTED").is_ok_and(|v| v == "shadow"),
-        lazy_tuples: tsrs_core::lazymembers::lazy_tuples(),
         #[cfg(feature = "site-counts")]
         inst_symbol_sites: FxHashMap::default(),
         lazy_cond_mapper: tsrs_core::lazymembers::lazy_cond_mapper(),
         lazy_prop_cache: tsrs_core::lazymembers::lazy_prop_cache(),
-        lazy_has_prop: tsrs_core::lazymembers::lazy_has_prop(),
-        lazy_unmatched: tsrs_core::lazymembers::lazy_unmatched(),
-        lazy_empty: tsrs_core::lazymembers::lazy_empty(),
         lazy_member_stats: tsrs_core::lazymembers::LazyMemberStats::default(),
         augment_filter: None,
         unmatched_found_pool: Vec::new(),
@@ -1992,7 +1983,6 @@ pub fn new_checker(program: &'static dyn Program) -> Box<Checker> {
         free_type_mapper_caches: Vec::new(),
         free_type_lists: Vec::new(),
         free_strings: Vec::new(),
-        free_name_sets: Vec::new(),
         ambient_modules_once: false,
         ambient_modules: Vec::new(),
         within_unreachable_code: false,
@@ -2197,6 +2187,10 @@ impl Checker {
             diagnostic_adds: base.diagnostic_adds,
             expression_checks: base.expression_checks,
             instantiation_stack: Vec::new(),
+            resolving_layout_symbols: Vec::new(),
+            alternate_member_layouts: Vec::new(),
+            layout_entries: Vec::new(),
+            layout_index: FxHashMap::default(),
             conditional_constraint_depth: base.conditional_constraint_depth,
             inline_level: base.inline_level,
             serialization_level: base.serialization_level,
@@ -2308,8 +2302,6 @@ impl Checker {
             source_file_links: base.source_file_links.fork(),
             reg_exp_scanner: None,
             pattern_for_type: base.pattern_for_type.clone(),
-            lazy_member_tables: crate::basedmap::Based::over(&base.lazy_member_tables),
-            lazy_unaffected: FxHashMap::default(),
             object_types_without_abstract_construct_signatures: base
                 .object_types_without_abstract_construct_signatures
                 .clone(),
@@ -2319,16 +2311,13 @@ impl Checker {
             ),
             lazy_mapped_tables: crate::basedmap::Based::over(&base.lazy_mapped_tables),
             lazy_members: base.lazy_members,
+            lazy_tuples: base.lazy_tuples,
             mapped_types_resolving: base.mapped_types_resolving,
             deep_nested_shadow: base.deep_nested_shadow,
-            lazy_tuples: base.lazy_tuples,
             #[cfg(feature = "site-counts")]
             inst_symbol_sites: base.inst_symbol_sites.clone(),
             lazy_cond_mapper: base.lazy_cond_mapper,
             lazy_prop_cache: base.lazy_prop_cache,
-            lazy_has_prop: base.lazy_has_prop,
-            lazy_unmatched: base.lazy_unmatched,
-            lazy_empty: base.lazy_empty,
             lazy_member_stats: base.lazy_member_stats,
             augment_filter: base.augment_filter,
             unmatched_found_pool: Vec::new(),
@@ -2567,7 +2556,6 @@ impl Checker {
             free_type_mapper_caches: Vec::new(),
             free_type_lists: Vec::new(),
             free_strings: Vec::new(),
-            free_name_sets: Vec::new(),
             ambient_modules_once: base.ambient_modules_once,
             ambient_modules: base.ambient_modules.clone(),
             within_unreachable_code: base.within_unreachable_code,

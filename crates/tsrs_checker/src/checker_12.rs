@@ -2657,6 +2657,17 @@ impl Checker {
         t
     }
 
+    pub(crate) fn mark_members_resolved(t: P<Type>) {
+        // A class or interface sets its own members, then again with the inherited ones: drop what isWeakType
+        // memoized in between. The memo lives on object types only; a union keeps `NonNullableUnion` and an
+        // intersection its `ShouldNormalize` memo in the same bits.
+        let mut object_flags = t.object_flags_lazy() | ObjectFlags::MembersResolved;
+        if t.flags().intersects(TypeFlags::Object) {
+            object_flags &= !ObjectFlags::WeakTypeMemo;
+        }
+        t.object_flags.set(object_flags);
+    }
+
     // checker.go:25615
     pub(crate) fn set_structured_type_members(
         &mut self,
@@ -2666,18 +2677,16 @@ impl Checker {
         construct_signatures: &[P<Signature>],
         index_infos: &[P<IndexInfo>],
     ) {
-        // A class or interface sets its own members, then again with the inherited ones: drop what isWeakType
-        // memoized in between. The memo lives on object types only; a union keeps `NonNullableUnion` and an
-        // intersection its `ShouldNormalize` memo in the same bits.
-        let mut object_flags = t.object_flags_lazy() | ObjectFlags::MembersResolved;
-        if t.flags().intersects(TypeFlags::Object) {
-            object_flags &= !ObjectFlags::WeakTypeMemo;
-        }
-        t.object_flags.set(object_flags);
+        Self::mark_members_resolved(t);
         let data = t.as_structured_type();
         data.set_members(members);
         let properties = self.get_named_members(members, t.symbol());
         data.set_properties(alloc_vec(properties));
+        if let Some(reference) = t.try_as_type_reference() {
+            reference.member_slots.set(None);
+        } else {
+            data.set_lazy(None);
+        }
         if call_signatures.is_empty() {
             if construct_signatures.is_empty() {
                 data.set_signatures(&[]);

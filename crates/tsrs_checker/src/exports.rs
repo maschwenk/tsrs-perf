@@ -580,7 +580,7 @@ impl Checker {
     // (semantictokens.go:450). With lazy member tables an instantiated class or interface reference answers those
     // queries from its table and its resolved property list stays empty, so ask through the table.
     pub fn has_properties_of_structured_type_exported(&mut self, t: P<Type>) -> bool {
-        self.has_properties_of_structured_type(t)
+        self.get_property_count_of_type(t) != 0
     }
 }
 
