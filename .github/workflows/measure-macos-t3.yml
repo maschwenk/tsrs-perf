@@ -1,0 +1,101 @@
+name: Compare fresh t3code CLI checks on Apple Silicon
+on:
+  push:
+    branches: [max/bench-t3-macos-cli-1127]
+    paths:
+      - .github/workflows/measure-macos-t3.yml
+      - .github/scripts/mac-t3/**
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compare:
+    runs-on: macos-15
+    timeout-minutes: 85
+    env:
+      BUILDS: '45987547196'
+      BUILD_WORKFLOW_HEAD: cea07b9562a7f05ed70b62ef78d2a4474e1df42f
+      T3: 3dbefda287dcdafa2b4cd69219eca5931ea08093
+      CI: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Capture runner identity and build observation tools
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          mkdir -p "$RUNNER_TEMP/proof" "$RUNNER_TEMP/tools"
+          {
+            sw_vers
+            uname -mrs
+            sysctl hw.machine hw.model hw.ncpu hw.memsize hw.pagesize hw.physicalcpu hw.logicalcpu machdep.cpu.brand_string
+            system_profiler SPHardwareDataType | grep -E 'Model Name|Model Identifier|Chip|Total Number of Cores|Memory:'
+            for key in ImageOS ImageVersion RUNNER_OS RUNNER_ARCH; do printenv "$key" || true; done
+            df -h /
+            xcodebuild -version
+          } | tee "$RUNNER_TEMP/proof/host.txt"
+          for tool in observe resident; do cc -std=c11 -Wall -Wextra -Werror -O2 ".github/scripts/mac-t3/$tool.c" -o "$RUNNER_TEMP/tools/$tool"; done
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 26.13.1
+          package-manager-cache: false
+      - name: Prepare the pinned public workspace
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/pnpm" --no-audit --no-fund pnpm@12.14.0
+          export PATH="$RUNNER_TEMP/pnpm/node_modules/.bin:$PATH"
+          echo "$RUNNER_TEMP/pnpm/node_modules/.bin" >> "$GITHUB_PATH"
+          git init -q "$RUNNER_TEMP/t3code"
+          cd "$RUNNER_TEMP/t3code"
+          git fetch --quiet --depth 1 https://github.com/pingdotgg/t3code.git "$T3"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$T3"
+          test "$(node --version)" = v26.13.1
+          test "$(pnpm --version)" = 12.14.0
+          shasum -a 256 pnpm-lock.yaml | tee "$RUNNER_TEMP/proof/lock.sha256"
+          grep -q 576be3c9961830497a14ded4fe32542f378c87add3e2098e5211e6412e6ca835 "$RUNNER_TEMP/proof/lock.sha256"
+          pnpm install --frozen-lockfile 2>&1 | tee "$RUNNER_TEMP/proof/pnpm-install.log"
+          git diff --exit-code HEAD
+          find . -name '*.tsbuildinfo' | sort > "$RUNNER_TEMP/proof/buildinfo-before.txt"
+          { git rev-parse HEAD; node --version; pnpm --version; df -h /; } > "$RUNNER_TEMP/proof/project.txt"
+      - name: Fetch and verify the two native compilers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          state=
+          for i in $(seq 1 120); do
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILDS" > "$RUNNER_TEMP/proof/build-run.json"
+            test "$(jq -r .head_sha "$RUNNER_TEMP/proof/build-run.json")" = "$BUILD_WORKFLOW_HEAD"
+            state=$(jq -r .status "$RUNNER_TEMP/proof/build-run.json")
+            if test "$state" = completed; then break; fi
+            sleep 30
+          done
+          test "$state" = completed
+          test "$(jq -r .conclusion "$RUNNER_TEMP/proof/build-run.json")" = success
+          for arm in A B; do
+            gh run download "$BUILDS" --repo "$GITHUB_REPOSITORY" --name "mac-compiler-$arm" --dir "$RUNNER_TEMP/$arm"
+            (cd "$RUNNER_TEMP/$arm" && shasum -a 256 -c "$arm.sha256")
+            chmod +x "$RUNNER_TEMP/$arm/$arm"
+            file "$RUNNER_TEMP/$arm/$arm" | grep -q arm64
+            cp "$RUNNER_TEMP/$arm/$arm.sha256" "$RUNNER_TEMP/$arm/build-$arm.log" "$RUNNER_TEMP/proof/"
+          done
+      - name: Check diagnostics and measure fresh compiler processes
+        run: |
+          set -euo pipefail
+          node .github/scripts/mac-t3/measure.mjs "$RUNNER_TEMP/A/A" "$RUNNER_TEMP/B/B" "$RUNNER_TEMP/t3code" "$RUNNER_TEMP/proof" "$RUNNER_TEMP/tools"
+          node .github/scripts/mac-t3/summarize.mjs "$RUNNER_TEMP/proof/raw.jsonl" | tee "$RUNNER_TEMP/proof/summary.jsonl"
+          (cd "$RUNNER_TEMP/t3code" && git diff --exit-code HEAD && find . -name '*.tsbuildinfo' | sort) > "$RUNNER_TEMP/proof/buildinfo-after.txt"
+          cmp "$RUNNER_TEMP/proof/buildinfo-before.txt" "$RUNNER_TEMP/proof/buildinfo-after.txt"
+      - if: always()
+        name: Retain the observations and integrity manifest
+        run: |
+          cd "$RUNNER_TEMP/proof" && find . -type f ! -name SHA256SUMS -print0 | xargs -0 shasum -a 256 > SHA256SUMS
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mac-t3-measurement
+          path: ${{ runner.temp }}/proof/
+          if-no-files-found: error
+          retention-days: 21
