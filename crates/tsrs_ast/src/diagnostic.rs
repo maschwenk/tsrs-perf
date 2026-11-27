@@ -561,6 +561,10 @@ impl DiagnosticsCollection {
         diagnostic
     }
 
+    pub fn has_global_diagnostics(&self) -> bool {
+        !self.non_file_diagnostics.is_empty()
+    }
+
     pub fn get_global_diagnostics(&mut self) -> Vec<P<Diagnostic>> {
         self.get_global_diagnostics_locked()
     }

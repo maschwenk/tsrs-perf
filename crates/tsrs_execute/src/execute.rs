@@ -457,6 +457,13 @@ fn perform_compilation(
         tsrs_compiler::enable_lazy_dts();
     }
     let mut program_options = ProgramOptions::new(config, host);
+    program_options.terminal_check = testing.is_none()
+        && !tsrs_compiler::Checker::census_enabled()
+        && !tsrs_core::fast::enabled()
+        && tsrs_core::compat::go_compatible_history()
+        && options.no_emit.is_true()
+        && !options.get_emit_declarations()
+        && !options.explain_files.is_true();
     program_options.leaf_files = leaf_settings.mode;
     program_options.checker_recycling = leaf_freeing_allowed;
 

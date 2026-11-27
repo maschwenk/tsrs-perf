@@ -72,7 +72,7 @@ impl std::ops::Deref for CheckerHandle {
     type Target = Checker;
     fn deref(&self) -> &Checker {
         match &self.kind {
-            CheckerHandleKind::Locked { guard, .. } => &guard.checker,
+            CheckerHandleKind::Locked { guard, .. } => guard,
             // SAFETY: `from_raw`'s contract: the checker is alive and exclusively ours until release.
             CheckerHandleKind::External { checker, .. } => unsafe { checker.as_ref() },
         }
@@ -82,7 +82,7 @@ impl std::ops::Deref for CheckerHandle {
 impl std::ops::DerefMut for CheckerHandle {
     fn deref_mut(&mut self) -> &mut Checker {
         match &mut self.kind {
-            CheckerHandleKind::Locked { guard, .. } => &mut guard.checker,
+            CheckerHandleKind::Locked { guard, .. } => guard,
             // SAFETY: `from_raw`'s contract: the checker is alive and exclusively ours until release.
             CheckerHandleKind::External { checker, .. } => unsafe { checker.as_mut() },
         }
@@ -289,7 +289,7 @@ struct CheckerSlot(Mutex<SlotChecker>);
 // (`arena::Region::route_diagnostics`), freed with the program like the checker's: the snapshot that keeps some of
 // them copies those (tsrs_incremental `Program::copy_diagnostics`).
 pub struct SlotChecker {
-    checker: Box<Checker>,
+    checker: Option<Box<Checker>>,
     region: Option<tsrs_core::arena::Region>,
     diagnostics: Option<tsrs_core::arena::Region>,
 }
@@ -304,7 +304,11 @@ pub struct CheckerScope {
 impl SlotChecker {
     fn new(program: &'static Program, in_region: bool) -> SlotChecker {
         if !in_region {
-            return SlotChecker { checker: new_checker(program), region: None, diagnostics: None };
+            return SlotChecker {
+                checker: Some(new_checker(program)),
+                region: None,
+                diagnostics: None,
+            };
         }
         let region = tsrs_core::arena::Region::new_scratch(1 << 20);
         let diagnostics = program
@@ -316,7 +320,7 @@ impl SlotChecker {
             let _route = diagnostics.as_ref().map(tsrs_core::arena::Region::route_diagnostics);
             new_checker(program)
         };
-        SlotChecker { checker, region: Some(region), diagnostics }
+        SlotChecker { checker: Some(checker), region: Some(region), diagnostics }
     }
 
     // A replacement for a retired checker: a fork of the frozen shared-graph seed when there is one (it starts with the
@@ -333,7 +337,7 @@ impl SlotChecker {
             let fork = crate::sharedgraph::fresh_fork();
             fork.unwrap_or_else(|| new_checker(program))
         };
-        SlotChecker { checker, region: Some(region), diagnostics }
+        SlotChecker { checker: Some(checker), region: Some(region), diagnostics }
     }
 
     // Makes the checker's region the allocation target (and the thread's scratch region, so that lazily filled
@@ -356,13 +360,13 @@ impl SlotChecker {
 impl std::ops::Deref for SlotChecker {
     type Target = Checker;
     fn deref(&self) -> &Checker {
-        &self.checker
+        self.checker.as_deref().expect("finished CLI checker")
     }
 }
 
 impl std::ops::DerefMut for SlotChecker {
     fn deref_mut(&mut self) -> &mut Checker {
-        &mut self.checker
+        self.checker.as_deref_mut().expect("finished CLI checker")
     }
 }
 
@@ -376,6 +380,15 @@ pub struct RetiredCheckers {
     pub(crate) type_count: u64,
     pub(crate) instantiation_count: u64,
     pub(crate) lazy_member_stats: tsrs_core::lazymembers::LazyMemberStats,
+}
+
+impl RetiredCheckers {
+    fn keep_statistics(&mut self, checker: &Checker) {
+        self.symbol_count += u64::from(checker.symbol_count);
+        self.type_count += u64::from(checker.type_count);
+        self.instantiation_count += u64::from(checker.total_instantiation_count);
+        self.lazy_member_stats.add(&checker.lazy_member_stats);
+    }
 }
 
 // With `--maxMemory`, a checker's relation caches are emptied between two files once they hold this many
@@ -880,7 +893,32 @@ impl CheckerPoolImpl {
             }
             let recycle = program.checker_recycling && !self.single_threaded && max_memory() > 0;
             let shared = crate::sharedgraph::enabled() && !program.single_threaded();
+            let file_weights = || {
+                if self.checker_count > 1 { checked_file_weights(program) } else { Vec::new() }
+            };
             let create_and_assign = || {
+                let assign = || match &self.inherited_associations {
+                    Some(associations) => associations.clone(),
+                    None => tsrs_core::phases::time(
+                        program.options().diagnostics_enabled(),
+                        "Checkers: assign files",
+                        || compute_associations(program, self.checker_count),
+                    ),
+                };
+                let early_assignment = (program.terminal_check && !self.single_threaded && !shared)
+                    .then(|| (assign(), file_weights()));
+                // Go balances all inputs, including unchecked libraries. A checker with much less
+                // checked work can release its memory while the longer queues are still growing.
+                let early_owner = early_assignment.as_ref().and_then(|(owners, weights)| {
+                    let mut loads = vec![0i64; self.checker_count];
+                    for (&owner, &weight) in owners.iter().zip(weights) {
+                        loads[owner] += weight;
+                    }
+                    let (i, &light) = loads.iter().enumerate().min_by_key(|&(_, w)| w)?;
+                    (light > 0
+                        && light < (loads.iter().sum::<i64>() / self.checker_count as i64) * 3 / 4)
+                        .then_some(i)
+                });
                 let create_start =
                     tsrs_core::phases::Timer::new(program.options().diagnostics_enabled());
                 tsrs_checker::links::set_multiple_checkers(self.checker_count > 1);
@@ -889,9 +927,12 @@ impl CheckerPoolImpl {
                 // With the shared graph (sharedgraph.rs) the pool's checkers are plain until the type-check pass makes
                 // them forks of the seed.
                 run_work_group(self.single_threaded, self.checker_count, |i| {
-                    let c = SlotChecker::new(program, recycle || program.checker_regions);
+                    let c = SlotChecker::new(
+                        program,
+                        recycle || program.checker_regions || early_owner == Some(i),
+                    );
                     if shared && i == 0 {
-                        crate::sharedgraph::note_fresh_checker(&c.checker);
+                        crate::sharedgraph::note_fresh_checker(&c);
                     }
                     *slots[i].lock().unwrap() = Some(CheckerSlot(Mutex::new(c)));
                 });
@@ -903,19 +944,15 @@ impl CheckerPoolImpl {
                         .into_boxed_slice(),
                 );
                 create_start.record("Checkers: create");
-                let associations = match &self.inherited_associations {
-                    Some(associations) => associations.clone(),
-                    None => tsrs_core::phases::time(
-                        program.options().diagnostics_enabled(),
-                        "Checkers: assign files",
-                        || compute_associations(program, self.checker_count),
-                    ),
+                let (associations, weights) = match early_assignment {
+                    Some((owners, weights)) => (owners, Some(weights)),
+                    None => (assign(), None),
                 };
-                (checkers, associations)
+                (checkers, associations, weights)
             };
             // tsrs-only: the CLI's leaf classification reads only the loaded program; it runs meanwhile
             // (fileregions.rs `prepare`).
-            let (checkers, associations) =
+            let (checkers, associations, weights) =
                 if program.leaf_files != crate::fileregions::LeafMode::Off && !self.single_threaded
                 {
                     std::thread::scope(|s| {
@@ -934,8 +971,7 @@ impl CheckerPoolImpl {
             let owners =
                 associations.iter().map(|&c| std::sync::atomic::AtomicU32::new(c as u32)).collect();
             let associations_for_reuse = associations;
-            let weights =
-                if self.checker_count > 1 { checked_file_weights(program) } else { Vec::new() };
+            let weights = weights.unwrap_or_else(file_weights);
             PoolState {
                 shared_graph: shared,
                 checkers,
@@ -962,6 +998,9 @@ impl CheckerPoolImpl {
         let state = self.create_checkers();
         let run = |idx: usize| {
             let mut guard = state.checkers[idx].0.lock().unwrap();
+            if guard.checker.is_none() {
+                return;
+            }
             let _scope = guard.enter();
             crate::sharedgraph::enter_checker(&guard);
             cb(idx, &mut guard);
@@ -1104,6 +1143,7 @@ impl CheckerPoolImpl {
         // TSRS_MEM_SPLIT: the type-check pass reports once every checker is done and before any thread exits.
         let mem_split = (allow_steal && tsrs_core::memsplit::program_reports())
             .then(|| std::sync::Barrier::new(if single { 1 } else { active.len() }));
+        let unfinished = std::sync::atomic::AtomicUsize::new(active.len());
         let run = |checker_idx: usize| {
             let mut file_cpu: Vec<(P<SourceFile>, f64)> = Vec::new();
             let mut guard = state.checkers[checker_idx].0.lock().unwrap();
@@ -1111,7 +1151,7 @@ impl CheckerPoolImpl {
             // file boundary after the freeze (`switch_to_fork` below), so that the pool does not wait for the seed.
             if allow_steal && state.shared_graph && !state.recycle {
                 let _region = guard.enter();
-                crate::sharedgraph::fork_into(&mut guard.checker);
+                crate::sharedgraph::fork_into(guard.checker.as_mut().expect("live checker"));
             }
             let mut scope = guard.enter();
             crate::sharedgraph::enter_checker(&guard);
@@ -1183,7 +1223,7 @@ impl CheckerPoolImpl {
                 }
                 let switch_to_fork = recycle
                     && state.shared_graph
-                    && !guard.checker.is_fork
+                    && !guard.is_fork
                     && crate::sharedgraph::try_base().is_some();
                 if switch_to_fork
                     || recycle
@@ -1200,6 +1240,25 @@ impl CheckerPoolImpl {
                 }
             }
             drop(scope);
+            if self.program.terminal_check
+                && allow_steal
+                && !single
+                && !steal
+                && !state.shared_graph
+                // Relaxed: only the count matters. The joined group orders all results.
+                && unfinished.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) > 1
+                && guard.region.as_ref().is_some_and(|r| !r.escaped())
+                && guard.can_finish_without_global_diagnostics()
+            {
+                // No subsequent pass of this one-shot command uses this checker's types. Its
+                // diagnostic allocations escape the scratch arena and the file trees stay live.
+                state.retired.lock().unwrap().keep_statistics(&guard);
+                {
+                    let _scope = guard.enter();
+                    drop(guard.checker.take());
+                }
+                drop(guard.region.take());
+            }
             if cost_cache {
                 state.file_cpu.lock().unwrap().extend(file_cpu);
             }
@@ -1245,15 +1304,12 @@ impl CheckerPoolImpl {
         {
             let _scope = old.enter();
             // Making the replacement left the thread's overlay (sharedgraph.rs): the old checker reads its own again.
-            crate::sharedgraph::enter_checker(&old.checker);
-            let globals = old.checker.get_global_diagnostics();
+            crate::sharedgraph::enter_checker(&old);
+            let globals = old.get_global_diagnostics();
             let mut retired = state.retired.lock().unwrap();
             retired.count += 1;
             retired.global_diagnostics.extend(globals);
-            retired.symbol_count += u64::from(old.checker.symbol_count);
-            retired.type_count += u64::from(old.checker.type_count);
-            retired.instantiation_count += u64::from(old.checker.total_instantiation_count);
-            retired.lazy_member_stats.add(&old.checker.lazy_member_stats);
+            retired.keep_statistics(&old);
             drop(retired);
             if crate::sharedgraph::debug_regions()
                 && let Some(region) = &old.region
@@ -1264,8 +1320,8 @@ impl CheckerPoolImpl {
                 eprintln!(
                     "dbg-retire thread={} fork={} types={} chunks={}",
                     std::thread::current().name().unwrap_or("?"),
-                    old.checker.is_fork,
-                    old.checker.type_count,
+                    old.is_fork,
+                    old.type_count,
                     chunks.join(",")
                 );
             }

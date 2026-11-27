@@ -66,6 +66,8 @@ pub struct ProgramOptions {
     /// with a fresh one (checkerpool.rs `retire_checker`; the CLI's `--noEmit` check, where no later pass needs the
     /// checker that checked a file).
     pub checker_recycling: bool,
+    /// The final whole-program CLI check may retire completed workers.
+    pub terminal_check: bool,
     /// tsrs-only: use virtual four-checker reporting sites and their incremental cache proof. API builds
     /// disable this to retain per-file diagnostics and Go-shaped build info; external pools opt out too.
     pub canonical_diagnostics: bool,
@@ -104,6 +106,7 @@ impl ProgramOptions {
             create_module_resolver: None,
             leaf_files: crate::fileregions::LeafMode::Off,
             checker_recycling: false,
+            terminal_check: false,
             canonical_diagnostics: true,
             checker_regions: false,
             checker_diagnostic_regions: false,
@@ -132,6 +135,7 @@ impl ProgramOptions {
             create_module_resolver,
             leaf_files: crate::fileregions::LeafMode::Off,
             checker_recycling: false,
+            terminal_check: false,
             canonical_diagnostics: true,
             checker_regions: false,
             checker_diagnostic_regions: false,
@@ -255,6 +259,7 @@ pub struct Program {
     pub tsgo_import_adjacency: OnceLock<Arc<[Vec<usize>]>>,
     // tsrs-only: `ProgramOptions::checker_recycling`.
     pub(crate) checker_recycling: bool,
+    pub(crate) terminal_check: bool,
     canonical_diagnostics: bool,
     // tsrs-only: `ProgramOptions::checker_regions`.
     pub(crate) checker_regions: bool,
@@ -572,6 +577,7 @@ pub fn new_program(opts: ProgramOptions) -> &'static Program {
         tsgo_check_slots: OnceLock::new(),
         tsgo_import_adjacency: OnceLock::new(),
         checker_recycling: opts.checker_recycling,
+        terminal_check: opts.terminal_check,
         canonical_diagnostics: opts.canonical_diagnostics,
         checker_regions: opts.checker_regions,
         checker_diagnostic_regions: opts.checker_diagnostic_regions,
@@ -852,6 +858,7 @@ impl Program {
             tsgo_check_slots: OnceLock::new(),
             tsgo_import_adjacency: OnceLock::new(),
             checker_recycling: false,
+            terminal_check: false,
             canonical_diagnostics: self.canonical_diagnostics,
             checker_regions: self.checker_regions,
             checker_diagnostic_regions: self.checker_diagnostic_regions,
@@ -1465,6 +1472,13 @@ impl Program {
                 );
                 let collect = |ctx: &Context, c: &mut Checker, file: P<SourceFile>| {
                     let diagnostics = collect(ctx, c, file);
+                    // A reported diagnostic can retain checker-allocated metadata through its chain.
+                    if self.terminal_check
+                        && !diagnostics.is_empty()
+                        && let Some(region) = tsrs_core::arena::current_region()
+                    {
+                        region.mark_escaped();
+                    }
                     if free_leaves && file.is_check_leaf() {
                         crate::fileregions::free(file);
                     }
