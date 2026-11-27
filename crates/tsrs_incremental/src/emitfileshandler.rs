@@ -265,6 +265,21 @@ impl<'a> EmitFilesHandler<'a> {
         let program = self.program.p();
         let mut results = FxHashMap::default();
         if self.is_for_dts_errors {
+            if to_emit.len() > 1 && !program.single_threaded() {
+                let files: Vec<_> = to_emit.iter().map(|entry| entry.3).collect();
+                let diagnostics = Mutex::new(FxHashMap::default());
+                if program.for_each_checker_group(&files, |checker, index, file| {
+                    let result = EmitResult {
+                        emit_skipped: true,
+                        diagnostics: program
+                            .get_declaration_diagnostics_with_checker(self.ctx, checker, file),
+                        ..Default::default()
+                    };
+                    diagnostics.lock().unwrap().insert(to_emit[index].0.clone(), result);
+                }) {
+                    return diagnostics.into_inner().unwrap();
+                }
+            }
             for (path, _, _, file, _) in to_emit {
                 let result = EmitResult {
                     emit_skipped: true,
