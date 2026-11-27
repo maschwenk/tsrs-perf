@@ -646,3 +646,33 @@ fn a_declaration_piece_returns_its_cached_diagnostics() {
         [(Some(types), name_pos("Service"), 2430), (Some(types), name_pos("Options"), 2428),]
     );
 }
+
+#[test]
+fn no_emit_program_can_check_again_and_query_each_files_checker() {
+    let large = (0..800).map(|i| format!("export const x{i} = {i};\n")).collect::<String>();
+    let files = [
+        (
+            "/src/tsconfig.json",
+            r#"{"compilerOptions":{"noLib":true,"noEmit":true,"skipLibCheck":true,"types":[],"checkers":2}}"#,
+        ),
+        (
+            "/src/lib.d.ts",
+            "interface Array<T> { length: number } interface Boolean {} interface CallableFunction {} interface NewableFunction {} interface Function {} interface IArguments {} interface Number {} interface Object {} interface RegExp {} interface String {}",
+        ),
+        ("/src/large.ts", large.as_str()),
+        ("/src/small.ts", "export const small = 1;"),
+    ];
+    let config = config_for(&files);
+    let host = host_for(&files);
+    let program = new_program(ProgramOptions::new(config, Arc::clone(&host)));
+    assert!(tsrs_compiler::check_no_emit_command(config, host).is_empty());
+    let ctx = Context::default();
+    assert!(program.get_global_diagnostics(&ctx).is_empty());
+    assert!(program.get_semantic_diagnostics(&ctx, None).is_empty());
+    for path in ["/src/small.ts", "/src/large.ts"] {
+        let file = program.get_source_file(path).unwrap();
+        assert!(program.get_type_checker_for_file(&ctx, file).type_count > 0);
+        assert!(program.get_semantic_diagnostics(&ctx, Some(file)).is_empty());
+    }
+    assert!(program.get_semantic_diagnostics(&ctx, None).is_empty());
+}

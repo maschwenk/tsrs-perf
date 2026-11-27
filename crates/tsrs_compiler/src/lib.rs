@@ -42,8 +42,8 @@ pub use host::{
 };
 pub use program::{
     CreateCheckerPool, CreateModuleResolver, Program, ProgramConfig, ProgramOptions,
-    SharedProgramData, filter_no_emit_semantic_diagnostics, free_program, free_unshared_program,
-    get_diagnostics_of_any_program, new_program, shared_program_data,
+    SharedProgramData, check_no_emit_command, filter_no_emit_semantic_diagnostics, free_program,
+    free_unshared_program, get_diagnostics_of_any_program, new_program, shared_program_data,
     sort_and_deduplicate_diagnostics, worker_pool,
 };
 pub use program_emit::{

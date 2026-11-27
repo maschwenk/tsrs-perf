@@ -456,18 +456,38 @@ fn perform_compilation(
     {
         tsrs_compiler::enable_lazy_dts();
     }
-    let mut program_options = ProgramOptions::new(config, host);
-    program_options.terminal_check = testing.is_none()
-        && !tsrs_compiler::Checker::census_enabled()
-        && !tsrs_core::fast::enabled()
-        && tsrs_core::compat::go_compatible_history()
+    start_tracing_if_needed(sys, &config);
+    if testing.is_none()
         && options.no_emit.is_true()
+        && !leaf_freeing_allowed
         && !options.get_emit_declarations()
-        && !options.explain_files.is_true();
+        && !options.diagnostics_enabled()
+        && !options.list_files.is_true()
+        && !options.list_files_only.is_true()
+        && !options.explain_files.is_true()
+        && !tsrs_core::fast::enabled()
+        && !tsrs_compiler::Checker::census_enabled()
+    {
+        let diagnostics = tsrs_compiler::check_no_emit_command(config, host);
+        tsc::report_diagnostic_list(
+            &diagnostics,
+            tsrs_core::NO_THREADS || options.single_threaded.is_true(),
+            report_diagnostic,
+            format_diagnostic,
+            &|text| sys.write(text),
+        );
+        report_error_summary(&diagnostics);
+        let status = if diagnostics.is_empty() {
+            ExitStatus::Success
+        } else {
+            ExitStatus::DiagnosticsPresentOutputsGenerated
+        };
+        return CommandLineResult { watcher: None, status };
+    }
+    let mut program_options = ProgramOptions::new(config, host);
     program_options.leaf_files = leaf_settings.mode;
     program_options.checker_recycling = leaf_freeing_allowed;
 
-    start_tracing_if_needed(sys, &config);
     let parse_start =
         tsc::DiagnosticTimer::new(sys, config.compiler_options().unwrap().diagnostics_enabled());
     let program = new_program(program_options);
