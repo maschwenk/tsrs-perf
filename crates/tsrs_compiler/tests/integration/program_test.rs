@@ -579,3 +579,35 @@ fn wildcard_types_with_project_reference_sources() {
     assert_eq!(file_names, ["/src/index.ts", "/src/node_modules/@types/fake/index.d.ts"]);
     assert_eq!(program.get_program_diagnostics(), [] as [tsrs_core::P<tsrs_ast::Diagnostic>; 0]);
 }
+
+#[test]
+fn a_declaration_piece_returns_its_cached_diagnostics() {
+    let files = [
+        (
+            "/src/tsconfig.json",
+            r#"{"compilerOptions":{"noLib":true,"strict":true},"files":["types.d.ts","augment.d.ts"]}"#,
+        ),
+        (
+            "/src/types.d.ts",
+            "interface Base { job: string }\ninterface Service extends Base {}\ninterface Options<T> {}\ninterface Other<T> {}",
+        ),
+        (
+            "/src/augment.d.ts",
+            "interface Service { job?: string }\ninterface Options<U> {}\ninterface Other<U> {}",
+        ),
+    ];
+    let program = new_program(ProgramOptions::new(config_for(&files), host_for(&files)));
+    program.bind_source_files();
+    let ctx = Context::default();
+    let types = program.get_source_file("/src/types.d.ts").unwrap();
+    let augment = program.get_source_file("/src/augment.d.ts").unwrap();
+    let mut worker = tsrs_checker::new_checker(program);
+    worker.get_diagnostics_exported(&ctx, augment);
+    let (diagnostics, _) = worker.check_source_file_piece(&ctx, types, 1..3);
+    let reports: Vec<_> = diagnostics.iter().map(|d| (d.file(), d.pos(), d.code())).collect();
+    let name_pos = |name| types.text().find(name).map(|i| i as u32);
+    assert_eq!(
+        reports,
+        [(Some(types), name_pos("Service"), 2430), (Some(types), name_pos("Options"), 2428),]
+    );
+}

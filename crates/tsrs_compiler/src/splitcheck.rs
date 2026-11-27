@@ -263,13 +263,16 @@ impl SplitFile {
                 results.iter().filter(|r| r.by_other).map(|r| r.piece).collect();
             drop(results);
             by_other.sort_unstable();
-            let mut found = Vec::new();
-            found.extend(by_other.into_iter().flat_map(|k| {
-                let (added, _) =
-                    checker.check_source_file_piece(ctx, self.file, self.pieces[k].clone());
-                added
-            }));
-            *self.owner_found.lock().unwrap() = found;
+            let before: rustc_hash::FxHashSet<_> =
+                checker.file_diagnostics_so_far(self.file).into_iter().collect();
+            for k in by_other {
+                checker.check_source_file_piece(ctx, self.file, self.pieces[k].clone());
+            }
+            *self.owner_found.lock().unwrap() = checker
+                .file_diagnostics_so_far(self.file)
+                .into_iter()
+                .filter(|d| !before.contains(d))
+                .collect();
             checker.add_piece_diagnostics(self.file, &[], &[]);
             return;
         }
