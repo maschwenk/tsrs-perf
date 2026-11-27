@@ -915,27 +915,15 @@ impl Printer {
                 }
 
                 // Write the comment line text
-                let mut end = std::cmp::min(loc_end, next_line_start);
-                let mut scan = pos;
-                while scan < end {
-                    let (ch, size) =
-                        stringutil::decode_rune(&text.as_bytes()[scan as usize..end as usize]);
-                    if size == 0 {
-                        break;
-                    }
-                    if stringutil::is_line_break(ch) {
-                        end = scan;
-                        break;
-                    }
-                    scan += size as u32;
-                }
-                let current_line_text = text[pos as usize..end as usize].trim();
+                let end = loc_end.min(next_line_start);
+                let line = &text[pos as usize..end as usize];
+                let current_line_text = line.trim();
                 if current_line_text.is_empty() {
                     // Empty string - make sure we write empty line
                     self.writer().write_line_force(true);
                 } else {
                     self.write_comment(current_line_text);
-                    if end != loc_end {
+                    if end < loc_end || line.ends_with(['\r', '\n', '\u{2028}', '\u{2029}']) {
                         self.write_line();
                     }
                 }
