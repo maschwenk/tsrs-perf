@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// CommonJS (bin/package.json) so Node 16 runs this extensionless file; Node < 18.19/20.10 refuses extensionless
-// ES modules in a "type": "module" package. The launcher itself is ESM.
+// Keep the CLI synchronous so launching the binary does not initialize the ES module loader.
+
 "use strict";
-import("../lib/tsrs.js").catch(e => {
+try {
+    require("../lib/tsrs.cjs");
+}
+catch (e) {
     console.error(`tsrs: ${e && e.stack || e}`);
     process.exit(1);
-});
+}
