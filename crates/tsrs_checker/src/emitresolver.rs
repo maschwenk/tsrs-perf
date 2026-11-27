@@ -431,11 +431,7 @@ impl EmitResolver {
             let this_container =
                 checker::Checker::get_this_container(first_identifier, false, false).unwrap();
             let sym = c.get_symbol_of_declaration(this_container);
-            if self
-                .is_symbol_accessible(c, sym, enclosing_declaration, meaning, false)
-                .accessibility
-                == SymbolAccessibility::Accessible
-            {
+            if c.symbol_is_visible(sym, enclosing_declaration, meaning, true) {
                 return SymbolAccessibilityResult {
                     accessibility: SymbolAccessibility::Accessible,
                     ..Default::default()

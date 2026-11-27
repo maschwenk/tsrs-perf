@@ -1759,14 +1759,12 @@ impl NodeBuilderImpl {
                 && ast::is_class_like(symbol.value_declaration().unwrap())
                 && self.ctx().flags.get().intersects(Flags::WriteClassExpressionAsTypeLiteral)
                 && (!ast::is_class_declaration(symbol.value_declaration().unwrap())
-                    || c.is_symbol_accessible(
+                    || !c.symbol_is_visible(
                         Some(symbol),
                         self.ctx().enclosing_declaration.get(),
                         is_instance_type,
-                        false, /*shouldComputeAliasesToMakeVisible*/
-                    )
-                    .accessibility
-                        != SymbolAccessibility::Accessible))
+                        true,
+                    )))
             || symbol.flags().intersects(SymbolFlags::Enum | SymbolFlags::ValueModule);
         if non_function_result {
             return (true, Some(symbol));
