@@ -12,7 +12,14 @@ fn test_is_content_mapper_supplemental_build_info_path() {
 
     assert!(is_content_mapper_supplemental_build_info_path(&path("/src/app.vue.0.ts"), &roots));
     assert!(is_content_mapper_supplemental_build_info_path(&path("/src/app.vue.12.mts"), &roots));
+    assert!(is_content_mapper_supplemental_build_info_path(&path("/src/app.vue.-1.tsx"), &roots));
+    assert!(is_content_mapper_supplemental_build_info_path(&path("/src/app.vue.+01.json"), &roots));
     assert!(!is_content_mapper_supplemental_build_info_path(&path("/src/app.vue.ts"), &roots));
     assert!(!is_content_mapper_supplemental_build_info_path(&path("/src/app.vue.0.txt"), &roots));
+    assert!(!is_content_mapper_supplemental_build_info_path(&path("/src/app.vue.0.d.ts"), &roots));
+    assert!(!is_content_mapper_supplemental_build_info_path(
+        &path("/src/app.vue.9223372036854775808.ts"),
+        &roots
+    ));
     assert!(!is_content_mapper_supplemental_build_info_path(&path("/src/other.vue.0.ts"), &roots));
 }

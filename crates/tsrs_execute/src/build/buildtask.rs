@@ -1258,10 +1258,9 @@ impl BuildTask {
                 if seen_roots.has(&input_path) || resolved_roots.has(&input_path) {
                     continue;
                 }
-                if is_content_mapper_supplemental_build_info_path(
-                    &input_path,
-                    get_build_info_root_info_reader().roots(),
-                ) && !tsrs_compiler::CompilerHost::fs(host).file_exists(&input_file)
+                if content_mapper_supplemental_root(&input_path)
+                    .is_some_and(|root| get_build_info_root_info_reader().has_root(root))
+                    && !tsrs_compiler::CompilerHost::fs(host).file_exists(&input_file)
                 {
                     continue;
                 }
@@ -1789,25 +1788,17 @@ pub fn is_content_mapper_supplemental_build_info_path<'a>(
     input_path: &Path,
     roots: impl IntoIterator<Item = &'a Path>,
 ) -> bool {
-    if roots.into_iter().any(|root| {
-        let Some(suffix) =
-            input_path.as_str().strip_prefix(root.as_str()).and_then(|rest| rest.strip_prefix('.'))
-        else {
-            return false;
-        };
-        let Some((index, extension)) = suffix.split_once('.') else {
-            return false;
-        };
-        if extension.is_empty() {
-            return false;
-        }
-        // Go `strconv.Atoi`: an optional sign and decimal digits.
-        let is_int = index.parse::<i64>().is_ok();
-        is_int && tsrs_contentmapper::is_supported_virtual_extension(&format!(".{extension}"))
-    }) {
-        return true;
-    }
-    false
+    content_mapper_supplemental_root(input_path)
+        .is_some_and(|root| roots.into_iter().any(|path| path.as_str() == root))
+}
+
+fn content_mapper_supplemental_root(input_path: &Path) -> Option<&str> {
+    // Virtual extensions have one component. Everything before the final ".<index>.<ext>" is the root.
+    let path = input_path.as_str();
+    let (stem, extension) = path.split_at(path.rfind('.')?);
+    let (root, index) = stem.rsplit_once('.')?;
+    index.parse::<i64>().ok()?;
+    tsrs_contentmapper::is_supported_virtual_extension(extension).then_some(root)
 }
 
 // Whether a changed file that is not a file of a program could change its module resolution: a file module
