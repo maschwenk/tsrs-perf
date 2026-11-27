@@ -1,0 +1,41 @@
+name: Check the packaged CLI on Windows
+
+on:
+  push:
+    branches: [max/bench-windows-cli-package-1127]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  consumer:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            target: x86_64-pc-windows-msvc
+            integrity: sha512-ZTEC3ITNsWH54a/0CtlRhNNfstVFHeg40sUjuQMYIlLiLxRFOXOPjFL/eyjZAS/1fNM+DGtz+6RY6AAMdqyoXw==
+          - os: windows-11-arm
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+            integrity: sha512-RqvW3yaksYl8h8m+aHGfWT9He6AwgvhJ38+8rcuE+Mz12DxVLeRVvWco5k1DZ3nMT056Erohyuwuv4F3A5Tnww==
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: oxc-project/setup-node@f46a72f95efdc55273fcd042d61c84e723b2892c
+        with:
+          registry-url: ""
+      - run: pnpm install --frozen-lockfile
+      - name: Exercise the installed command and its spawn fallback
+        shell: pwsh
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          NATIVE_TARGET: ${{ matrix.target }}
+          NATIVE_INTEGRITY: ${{ matrix.integrity }}
+        run: ./.github/scripts/check-packaged-cli.ps1
