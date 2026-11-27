@@ -13,6 +13,75 @@ use tsrs_diagnostics as diagnostics;
 //   type UnionReduction (checker.go:26072)
 //   const (checker.go:26074): UnionReductionNone, UnionReductionLiteral, UnionReductionSubtype
 
+/// The initial extends type of a distributive conditional, before its infer parameters are fixed.
+/// Only the distributed parameter changes between constituent mappers.
+pub(crate) struct DistributedExtends {
+    charge: u32,
+    value: Option<P<Type>>,
+}
+
+impl DistributedExtends {
+    pub(crate) fn new(root: P<ConditionalRoot>, check_type: P<Type>) -> Option<Self> {
+        if cfg!(feature = "site-counts") {
+            return None;
+        }
+        let varying = get_non_distributed_type_parameter(check_type)?;
+        let charge = Self::reference_charge(root.extends_type.get()?, varying, 0)?;
+        (charge > 1).then_some(Self { charge, value: None })
+    }
+
+    const DEPTH: usize = 3;
+
+    // These non-tuple references intern by their arguments. A plain parameter lookup in the
+    // distribution's simple/array mapper cannot reenter the checker. Bound the preflight walk.
+    fn reference_charge(t: P<Type>, varying: P<Type>, depth: usize) -> Option<u32> {
+        if t.flags().intersects(TypeFlags::TypeParameter) {
+            return (!t.as_type_parameter().is_distributed.get() && t != varying).then_some(1);
+        }
+        if depth + 1 >= Self::DEPTH
+            || !t.flags().intersects(TypeFlags::Object)
+            || !is_non_deferred_type_reference(t)
+            || t.object_target()?.object_flags().intersects(ObjectFlags::Tuple)
+            || t.alias().is_some()
+        {
+            return None;
+        }
+        let arguments = t.as_type_reference().resolved_type_arguments.get()?;
+        if arguments.is_empty() || arguments.len() > 8 {
+            return None;
+        }
+        arguments.iter().try_fold(1, |charge, &arg| {
+            Some(charge + Self::reference_charge(arg, varying, depth + 1)?)
+        })
+    }
+
+    fn instantiate(
+        &mut self,
+        c: &mut Checker,
+        t: P<Type>,
+        mapper: Option<P<TypeMapper>>,
+    ) -> P<Type> {
+        if c.instantiation_stack.len() + Self::DEPTH >= MAX_INSTANTIATION_DEPTH
+            || c.instantiation_count + self.charge >= MAX_INSTANTIATIONS_PER_EXPRESSION
+        {
+            return c.instantiate_type(t, mapper);
+        }
+        if let Some(value) = self.value {
+            // Each constituent starts this instantiation with a fresh mapper cache, discarded
+            // on return. Preserve the original misses in the per-expression and total budgets.
+            c.instantiation_count += self.charge;
+            c.total_instantiation_count += self.charge;
+            return value;
+        }
+        let before = c.total_instantiation_count;
+        let value = c.instantiate_type(t, mapper);
+        if c.total_instantiation_count - before == self.charge {
+            self.value = Some(value);
+        }
+        value
+    }
+}
+
 // checker.go:23954
 pub(crate) fn is_mutable_tuple_type(t: P<Type>) -> bool {
     is_tuple_type(t) && !t.target_tuple_type().readonly.get()
@@ -1257,7 +1326,7 @@ impl Checker {
             links.resolved_type.set(Some(self.get_conditional_type(
                 root, None,  /*mapper*/
                 false, /*forConstraint*/
-                None,
+                None, None,
             )));
             if !outer_type_parameters.is_empty() {
                 root.instantiations.make();
@@ -1281,6 +1350,7 @@ impl Checker {
         mapper: Option<P<TypeMapper>>,
         for_constraint: bool,
         alias: Option<P<TypeAlias>>,
+        fixed_extends: Option<&mut DistributedExtends>,
     ) -> P<Type> {
         let (mappers, contexts, lists) = (
             self.scratch_mappers.len(),
@@ -1289,7 +1359,8 @@ impl Checker {
         );
         let census_span =
             self.census_begin(crate::workcensus::Cat::Cond, || crate::workcensus::CKey::Root(root));
-        let result = self.get_conditional_type_worker(root, mapper, for_constraint, alias);
+        let result =
+            self.get_conditional_type_worker(root, mapper, for_constraint, alias, fixed_extends);
         if let Some(t) = self.census_end(census_span) {
             let never = (result == self.never_type) as u64;
             self.census.as_mut().unwrap().record(
@@ -1326,6 +1397,7 @@ impl Checker {
         mapper: Option<P<TypeMapper>>,
         for_constraint: bool,
         alias: Option<P<TypeAlias>>,
+        mut fixed_extends: Option<&mut DistributedExtends>,
     ) -> P<Type> {
         let mut root = root;
         let mut mapper = mapper;
@@ -1350,7 +1422,12 @@ impl Checker {
             let actual_check_type =
                 self.get_actual_type_variable(root.check_type.get().unwrap()).unwrap();
             let check_type = self.instantiate_type(actual_check_type, mapper);
-            let extends_type = self.instantiate_type(root.extends_type.get().unwrap(), mapper);
+            let raw_extends = root.extends_type.get().unwrap();
+            let extends_type = if let Some(fixed) = fixed_extends.take() {
+                fixed.instantiate(self, raw_extends, mapper)
+            } else {
+                self.instantiate_type(raw_extends, mapper)
+            };
             if check_type == self.error_type || extends_type == self.error_type {
                 return self.error_type;
             }

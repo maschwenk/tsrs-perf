@@ -8,6 +8,9 @@ use tsrs_core::*;
 use tsrs_diagnostics as diagnostics;
 use tsrs_diagnostics::Message;
 
+pub(crate) const MAX_INSTANTIATION_DEPTH: usize = 100;
+pub(crate) const MAX_INSTANTIATIONS_PER_EXPRESSION: u32 = 5_000_000;
+
 // Non-function declarations in checker.go:21764-23953 (hand-ported by checker-foundation):
 //   type TupleNormalizer (checker.go:23816)
 
@@ -1314,7 +1317,9 @@ impl Checker {
         m: P<TypeMapper>,
         alias: Option<P<TypeAlias>>,
     ) -> P<Type> {
-        if self.instantiation_stack.len() == 100 || self.instantiation_count >= 5_000_000 {
+        if self.instantiation_stack.len() == MAX_INSTANTIATION_DEPTH
+            || self.instantiation_count >= MAX_INSTANTIATIONS_PER_EXPRESSION
+        {
             // We have reached 100 recursive type instantiations, or 5M type instantiations caused by the same statement
             // or expression. There is a very high likelihood we're dealing with a combination of infinite generic types
             // that perpetually generate new type identities, so we stop the recursion here by yielding the error type.
@@ -2140,11 +2145,23 @@ impl Checker {
                                 });
                         }
                         let never_type = self.never_type;
+                        let mut fixed_extends =
+                            if distribution_type.flags().intersects(TypeFlags::Union) {
+                                crate::checker_12::DistributedExtends::new(root, check_type)
+                            } else {
+                                None
+                            };
                         self.map_type_with_alias(
                             distribution_type,
                             |c, t| {
                                 let m = prepend_type_mapping(check_type, t, Some(new_mapper));
-                                let r = c.get_conditional_type(root, Some(m), for_constraint, None);
+                                let r = c.get_conditional_type(
+                                    root,
+                                    Some(m),
+                                    for_constraint,
+                                    None,
+                                    fixed_extends.as_mut(),
+                                );
                                 // SAFETY: made here for this one call.
                                 unsafe { recycle_mapping(m, false) };
                                 if r == never_type {
@@ -2155,7 +2172,13 @@ impl Checker {
                             alias,
                         )
                     }
-                    _ => self.get_conditional_type(root, Some(new_mapper), for_constraint, alias),
+                    _ => self.get_conditional_type(
+                        root,
+                        Some(new_mapper),
+                        for_constraint,
+                        alias,
+                        None,
+                    ),
                 };
                 if let Some(t) = self.census_end(census_span) {
                     let census = self.census.as_mut().unwrap();
