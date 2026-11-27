@@ -1024,6 +1024,31 @@ impl BuildInfo {
         )
     }
 
+    fn root_files(&self) -> impl Iterator<Item = (&str, Option<&BuildInfoFileInfo>)> {
+        self.root
+            .iter()
+            .flat_map(move |root| {
+                let end = if root.non_incremental.is_empty() && root.end != 0 {
+                    root.end
+                } else {
+                    root.start
+                };
+                (root.start..=end).map(move |id| {
+                    if root.non_incremental.is_empty() {
+                        (self.file_name(id), self.file_info(id))
+                    } else {
+                        (root.non_incremental.as_str(), None)
+                    }
+                })
+            })
+            .filter(|(name, _)| !name.is_empty())
+    }
+
+    /// Root names before applying the build info's resolved-root mappings.
+    pub fn root_file_names(&self) -> impl Iterator<Item = &str> {
+        self.root_files().map(|(name, _)| name)
+    }
+
     // buildInfo.go:589
     pub fn get_build_info_root_info_reader(
         &self,
@@ -1053,10 +1078,7 @@ impl BuildInfo {
             }
         }));
 
-        let mut add_root = |resolved_root: &str, file_info: Option<&BuildInfoFileInfo>| {
-            if resolved_root.is_empty() {
-                return;
-            }
+        for (resolved_root, file_info) in self.root_files() {
             let resolved_root_path = to_path(resolved_root);
             if let Some(root_path) = resolved_to_root.get(&resolved_root_path) {
                 root_to_resolved.insert(root_path.clone(), resolved_root_path.clone());
@@ -1065,18 +1087,6 @@ impl BuildInfo {
             }
             if let Some(file_info) = file_info {
                 resolved_root_file_infos.insert(resolved_root_path, file_info.clone());
-            }
-        };
-
-        for root in &self.root {
-            if !root.non_incremental.is_empty() {
-                add_root(&root.non_incremental, None);
-            } else if root.end == 0 {
-                add_root(self.file_name(root.start), self.file_info(root.start));
-            } else {
-                for i in root.start..=root.end {
-                    add_root(self.file_name(i), self.file_info(i));
-                }
             }
         }
 

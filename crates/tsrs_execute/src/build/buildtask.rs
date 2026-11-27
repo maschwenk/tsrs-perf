@@ -1058,7 +1058,7 @@ impl BuildTask {
         // Check the build info
         let build_info_path = resolved.get_build_info_file_name();
         let build_info_directory = std::cell::OnceCell::new();
-        let get_build_info_directory = || -> String {
+        let get_build_info_directory = || -> &str {
             build_info_directory
                 .get_or_init(|| {
                     tspath::get_directory_path(&tspath::get_normalized_absolute_path(
@@ -1066,7 +1066,7 @@ impl BuildTask {
                         &orchestrator.compare_paths_options.current_directory,
                     ))
                 })
-                .clone()
+                .as_str()
         };
         let (build_info, build_info_time) =
             self.load_or_store_build_info(orchestrator, config_path, &build_info_path);
@@ -1150,7 +1150,7 @@ impl BuildTask {
             }
 
             // Some of the emit files like source map or dts etc are not yet done
-            if build_info.is_emit_pending(&resolved, &get_build_info_directory()) {
+            if build_info.is_emit_pending(&resolved, get_build_info_directory()) {
                 return UpToDateStatus::with(
                     UpToDateStatusType::OutOfDateOptions,
                     StatusData::String(build_info_path),
@@ -1167,7 +1167,7 @@ impl BuildTask {
         let get_build_info_root_info_reader = || {
             root_info_reader.get_or_init(|| {
                 build_info.get_build_info_root_info_reader(
-                    &get_build_info_directory(),
+                    get_build_info_directory(),
                     &orchestrator.compare_paths_options,
                 )
             })
@@ -1222,14 +1222,31 @@ impl BuildTask {
             seen_roots.add(input_path);
         }
 
-        if let Some(root) =
-            get_build_info_root_info_reader().roots().find(|root| !seen_roots.has(root))
-        {
+        let has_mapped_roots = !build_info.resolved_root.is_empty();
+        let missing_root = if has_mapped_roots || root_info_reader.get().is_some() {
+            get_build_info_root_info_reader()
+                .roots()
+                .find(|root| !seen_roots.has(root))
+                .map(Path::to_string)
+        } else {
+            build_info
+                .root_file_names()
+                .map(|name| {
+                    tspath::to_path_cow(
+                        name,
+                        get_build_info_directory(),
+                        orchestrator.compare_paths_options.use_case_sensitive_file_names,
+                    )
+                })
+                .find(|root| !seen_roots.keys().contains(root.as_ref()))
+                .map(|root| root.into_owned())
+        };
+        if let Some(root) = missing_root {
             // File was root file when project was built but its not any more
             return UpToDateStatus::with(
                 UpToDateStatusType::OutOfDateRoots,
                 StatusData::InputOutputName(InputOutputName {
-                    input: root.to_string(),
+                    input: root,
                     output: build_info_path,
                 }),
             );
@@ -1237,11 +1254,16 @@ impl BuildTask {
 
         if build_info.is_incremental() {
             let mut resolved_roots: Set<Path> = Set::default();
-            resolved_roots.m.extend(get_build_info_root_info_reader().roots().filter_map(|root| {
-                let (_, resolved) =
-                    get_build_info_root_info_reader().get_build_info_file_info(root);
-                if resolved.is_empty() { None } else { Some(resolved) }
-            }));
+            // Without mappings, every resolved root was already found in seen_roots.
+            if has_mapped_roots {
+                resolved_roots.m.extend(get_build_info_root_info_reader().roots().filter_map(
+                    |root| {
+                        let (_, resolved) =
+                            get_build_info_root_info_reader().get_build_info_file_info(root);
+                        if resolved.is_empty() { None } else { Some(resolved) }
+                    },
+                ));
+            }
             for (index, build_info_file_info) in build_info.file_infos.iter().enumerate() {
                 let build_info_file_name = &build_info.file_names[index];
                 // Lib files bundled with the compiler can change only with the version of the compiler,
@@ -1251,16 +1273,17 @@ impl BuildTask {
                 }
                 let input_file = tspath::get_normalized_absolute_path(
                     build_info_file_name,
-                    &get_build_info_directory(),
+                    get_build_info_directory(),
                 );
                 let input_path = orchestrator.to_path(&input_file);
                 // Root files are already checked
                 if seen_roots.has(&input_path) || resolved_roots.has(&input_path) {
                     continue;
                 }
-                if content_mapper_supplemental_root(&input_path)
-                    .is_some_and(|root| get_build_info_root_info_reader().has_root(root))
-                    && !tsrs_compiler::CompilerHost::fs(host).file_exists(&input_file)
+                if content_mapper_supplemental_root(&input_path).is_some_and(|root| {
+                    seen_roots.keys().contains(root)
+                        && get_build_info_root_info_reader().has_root(root)
+                }) && !tsrs_compiler::CompilerHost::fs(host).file_exists(&input_file)
                 {
                     continue;
                 }
@@ -1413,7 +1436,7 @@ impl BuildTask {
             return result;
         }
 
-        let package_jsons = build_info.get_package_jsons(&get_build_info_directory());
+        let package_jsons = build_info.get_package_jsons(get_build_info_directory());
         if let Some(result) = package_jsons.iter().find_map(|package_json| {
             let package_json_time = host.get_m_time(package_json);
             if package_json_time.is_none() {
@@ -1437,7 +1460,7 @@ impl BuildTask {
             return result;
         }
         let missing_package_jsons =
-            build_info.get_missing_package_jsons(&get_build_info_directory());
+            build_info.get_missing_package_jsons(get_build_info_directory());
         if let Some(result) = missing_package_jsons.iter().find_map(|package_json| {
             if host.get_m_time(package_json).is_some() {
                 Some(UpToDateStatus::with(
