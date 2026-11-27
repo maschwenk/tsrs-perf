@@ -182,6 +182,16 @@ impl EmitTimes {
 impl Program {
     // program.go:1875
     pub fn emit(&'static self, ctx: &Context, options: &EmitOptions) -> EmitResult {
+        self.emit_with_map_data(ctx, options, true)
+    }
+
+    /// Set `collect_map_data` when the caller consumes the raw maps in `EmitResult::source_maps`.
+    pub fn emit_with_map_data(
+        &'static self,
+        ctx: &Context,
+        options: &EmitOptions,
+        collect_map_data: bool,
+    ) -> EmitResult {
         if !options.force_emit && options.emit_only != EmitOnly::EmitOnlyBuilderSignature {
             let result =
                 handle_no_emit_options(ctx, &self, options.target_source_files.as_deref(), None);
@@ -190,7 +200,10 @@ impl Program {
             }
         }
         combine_emit_results(
-            self.emit_each_file(ctx, options).into_iter().map(|(_, result)| Some(result)).collect(),
+            self.emit_each_file_with_map_data(ctx, options, collect_map_data)
+                .into_iter()
+                .map(|(_, result)| Some(result))
+                .collect(),
         )
     }
 
@@ -201,6 +214,15 @@ impl Program {
         &'static self,
         ctx: &Context,
         options: &EmitOptions,
+    ) -> Vec<(P<SourceFile>, EmitResult)> {
+        self.emit_each_file_with_map_data(ctx, options, true)
+    }
+
+    fn emit_each_file_with_map_data(
+        &'static self,
+        ctx: &Context,
+        options: &EmitOptions,
+        collect_map_data: bool,
     ) -> Vec<(P<SourceFile>, EmitResult)> {
         let new_line = self.options().new_line.get_new_line_character();
         let force_dts_emit = options.emit_only == EmitOnly::EmitOnlyBuilderSignature
@@ -250,6 +272,7 @@ impl Program {
                         paths,
                         source_file,
                         emit_result: EmitResult::default(),
+                        collect_map_data,
                         force_emit: options.force_emit,
                         write_file: options.write_file,
                         times: &times,

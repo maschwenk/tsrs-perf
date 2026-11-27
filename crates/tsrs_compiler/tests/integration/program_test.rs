@@ -143,6 +143,41 @@ fn config_for(files: &[(&str, &str)]) -> P<tsoptions::ParsedCommandLine> {
     P::new(config.unwrap())
 }
 
+#[test]
+fn program_emit_returns_the_maps_written_for_javascript_and_declarations() {
+    let files = [
+        (
+            "/src/tsconfig.json",
+            r#"{"compilerOptions":{"noLib":true,"target":"esnext","sourceMap":true,"declaration":true,"declarationMap":true},"files":["a.ts"]}"#,
+        ),
+        ("/src/a.ts", "export const word = \"📚\";"),
+    ];
+    let emit = |collect| {
+        let host = host_for(&files);
+        let program = new_program(ProgramOptions::new(config_for(&files), Arc::clone(&host)));
+        let ctx = Context::default();
+        let options = tsrs_compiler::EmitOptions::default();
+        let result = if collect {
+            program.emit(&ctx, &options)
+        } else {
+            program.emit_with_map_data(&ctx, &options, false)
+        };
+        let outputs =
+            ["/src/a.js.map", "/src/a.d.ts.map"].map(|path| host.fs().read_file(path).unwrap());
+        for map in &result.source_maps {
+            let written = host.fs().read_file(&format!("{}.map", map.generated_file)).unwrap();
+            let json = tsrs_core::json::unmarshal(&written).unwrap();
+            assert_eq!(map.source_map, tsrs_sourcemap::RawSourceMap::from_json(&json).unwrap());
+        }
+        (outputs, result.source_maps.len())
+    };
+    let (api_output, api_maps) = emit(true);
+    let (file_output, file_maps) = emit(false);
+    assert_eq!(api_maps, 2);
+    assert_eq!(file_maps, 0);
+    assert_eq!(api_output, file_output);
+}
+
 // A pool outside the built-in one: hands out checkers through `CheckerHandle::from_raw` and takes them back on
 // release, like the project system's pool.
 struct TestPool {
