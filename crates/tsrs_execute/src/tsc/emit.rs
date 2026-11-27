@@ -132,12 +132,13 @@ pub fn emit_files_and_report_errors(input: &EmitInput) -> CompileAndEmitResult {
             super::DiagnosticTimer::new(input.sys, input.program.options().diagnostics_enabled());
         emit_result =
             tsrs_core::phases::time(input.program.options().diagnostics_enabled(), "Emit", || {
-                program.emit(
+                program.emit_with_map_data(
                     &ctx,
                     &tsrs_compiler::EmitOptions {
                         write_file: input.write_file,
                         ..Default::default()
                     },
+                    input.testing.is_some(), // on_emitted_files receives the full result
                 )
             });
         times.emit_time += emit_start.elapsed();

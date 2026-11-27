@@ -199,6 +199,7 @@ mod emit {
         pub(crate) paths: OutputPaths,
         pub(crate) source_file: P<SourceFile>,
         pub(crate) emit_result: EmitResult,
+        pub(crate) collect_map_data: bool,
         pub(crate) force_emit: bool,
         pub(crate) write_file: Option<WriteFile<'a>>,
         pub(crate) times: &'a EmitTimes,
@@ -550,7 +551,9 @@ mod emit {
             let mut source_map_url_pos = None;
             if let Some(source_map_generator) = &mut source_map_generator {
                 let source_map_start = self.times.start();
-                if map_options.source_map.is_true() || map_options.inline_source_map.is_true() {
+                if self.collect_map_data
+                    && (map_options.source_map.is_true() || map_options.inline_source_map.is_true())
+                {
                     self.emit_result.source_maps.push(SourceMapEmitResult {
                         input_source_file_names: source_map_generator.sources().to_vec(),
                         source_map: source_map_generator.raw_source_map(),
