@@ -530,24 +530,29 @@ pub fn get_normalized_absolute_path_without_root(
 pub fn get_normalized_absolute_path(file_name: &str, current_directory: &str) -> String {
     let root_length = get_root_length(file_name);
     let file_name = if root_length == 0 && !current_directory.is_empty() {
-        combine_paths(current_directory, &[file_name])
+        std::borrow::Cow::Owned(combine_paths(current_directory, &[file_name]))
     } else {
-        // CombinePaths normalizes slashes, so not necessary in other branch
-        normalize_slashes(file_name)
+        normalize_slashes_cow(file_name)
     };
     let root_length = get_root_length(&file_name);
-
-    if let Some(simple_normalized) = simple_normalize_path(&file_name) {
-        let length = simple_normalized.len();
-        if length > root_length {
-            return remove_trailing_directory_separator(&simple_normalized).to_string();
+    match simple_normalize_path(file_name) {
+        Ok(path) => {
+            let mut path = path.into_owned();
+            if path.len() > root_length && has_trailing_directory_separator(&path) {
+                path.pop();
+            } else if path.len() == root_length
+                && root_length != 0
+                && !has_trailing_directory_separator(&path)
+            {
+                path.push('/');
+            }
+            path
         }
-        if length == root_length && root_length != 0 {
-            return ensure_trailing_directory_separator(&simple_normalized);
-        }
-        return simple_normalized.to_string();
+        Err(path) => normalize_complex_path(path, root_length),
     }
+}
 
+fn normalize_complex_path(file_name: std::borrow::Cow<'_, str>, root_length: usize) -> String {
     let fb = file_name.as_bytes();
     let length = fb.len();
     let root = &file_name[..root_length];
@@ -652,26 +657,33 @@ pub fn get_normalized_absolute_path(file_name: &str, current_directory: &str) ->
     if length == root_length {
         return ensure_trailing_directory_separator(&file_name);
     }
-    file_name
+    file_name.into_owned()
 }
 
-fn simple_normalize_path(path: &str) -> Option<std::borrow::Cow<'_, str>> {
+fn simple_normalize_path(
+    path: std::borrow::Cow<'_, str>,
+) -> Result<std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>> {
     use std::borrow::Cow;
-    // Most paths don't require normalization
-    if !has_relative_path_segment(path) {
-        return Some(Cow::Borrowed(path));
+    if !has_relative_path_segment(&path) {
+        return Ok(path);
+    }
+    if !path.starts_with("./") && !path.contains("/./") {
+        return Err(path);
     }
     // Some paths only require cleanup of `/./` or leading `./`
-    let simplified = path.replace("/./", "/");
+    let mut simplified = path.replace("/./", "/");
     let trimmed = simplified.strip_prefix("./").unwrap_or(&simplified);
     if trimmed != path
         && !has_relative_path_segment(trimmed)
         && !(trimmed != simplified && trimmed.starts_with('/'))
     {
         // If we trimmed a leading "./" and the path now starts with "/", we changed the meaning
-        return Some(Cow::Owned(trimmed.to_string()));
+        if trimmed.len() != simplified.len() {
+            simplified.drain(..2);
+        }
+        return Ok(Cow::Owned(simplified));
     }
-    None
+    Err(path)
 }
 
 // hasRelativePathSegment reports whether p contains ".", "..", "./", "../", "/.", "/..", "//", "/./", or "/../".
@@ -727,31 +739,23 @@ fn dot_segment_at(p: &[u8], start: usize) -> bool {
 /// `normalize_path` borrowing from `path` when it is already normal (no backslash, no `.` or `..` segment, no
 /// repeated separator): a file name from the file system usually is.
 pub fn normalize_path_cow(path: &str) -> std::borrow::Cow<'_, str> {
-    if !path.as_bytes().contains(&b'\\')
-        && let Some(normalized) = simple_normalize_path(path)
-    {
-        return normalized;
+    match simple_normalize_path(normalize_slashes_cow(path)) {
+        Ok(normalized) => normalized,
+        Err(path) => {
+            let root_length = get_root_length(&path);
+            let trailing = has_trailing_directory_separator(&path);
+            let mut normalized = normalize_complex_path(path, root_length);
+            if trailing && !normalized.is_empty() && !has_trailing_directory_separator(&normalized)
+            {
+                normalized.push('/');
+            }
+            std::borrow::Cow::Owned(normalized)
+        }
     }
-    std::borrow::Cow::Owned(normalize_path(path))
 }
 
 pub fn normalize_path(path: &str) -> String {
-    // normalize_slashes without copying a path that has no backslash (the common case; the result is copied once)
-    let slashed;
-    let path: &str = if path.as_bytes().contains(&b'\\') {
-        slashed = path.replace('\\', "/");
-        &slashed
-    } else {
-        path
-    };
-    if let Some(normalized) = simple_normalize_path(path) {
-        return normalized.into_owned();
-    }
-    let mut normalized = get_normalized_absolute_path(path, "");
-    if !normalized.is_empty() && has_trailing_directory_separator(path) {
-        normalized = ensure_trailing_directory_separator(&normalized);
-    }
-    normalized
+    normalize_path_cow(path).into_owned()
 }
 
 pub fn get_canonical_file_name(file_name: &str, use_case_sensitive_file_names: bool) -> String {
