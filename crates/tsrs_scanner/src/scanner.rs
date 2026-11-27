@@ -3393,9 +3393,21 @@ pub fn skip_trivia_ex(text: &str, pos: u32, options: Option<&SkipTriviaOptions>)
                     }
                     if bytes[(pos + 1) as usize] == b'*' {
                         pos += 2;
-                        let rest = &bytes[pos as usize..text_len as usize];
-                        pos = memchr::memmem::find(rest, b"*/")
-                            .map_or(text_len, |offset| pos + offset as u32 + 2);
+                        if bytes.len() == text_len as usize {
+                            let rest = &bytes[pos as usize..];
+                            pos = memchr::memmem::find(rest, b"*/")
+                                .map_or(text_len, |offset| pos + offset as u32 + 2);
+                        } else {
+                            // A wrapped source length can fall inside a UTF-8 character.
+                            while pos < text_len {
+                                if bytes[pos as usize] == b'*' && (pos + 1 < text_len) && bytes[(pos + 1) as usize] == b'/' {
+                                    pos += 2;
+                                    break;
+                                }
+                                let (_, size) = decode_rune(&bytes[pos as usize..]);
+                                pos += size as u32;
+                            }
+                        }
                         can_consume_star = false;
                         continue;
                     }
