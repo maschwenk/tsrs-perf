@@ -3425,6 +3425,8 @@ impl Checker {
                 instantiated_base_type,
             );
         }
+        self.lazy_member_stats.member_tables_created += 1;
+        self.lazy_member_stats.tuple_tables_created += u64::from(t.is_tuple_type());
         let lazy = P::new(SharedMemberSlots {
             layout,
             mapper,
@@ -3896,6 +3898,9 @@ impl Checker {
             };
             if entry.rank != 2 {
                 named_count += 1;
+                // Count own named slots once per layout, including layouts shared by many references.
+                self.lazy_member_stats.member_table_declared_members +=
+                    u64::from(entry.origin.base == MEMBER_ORIGIN_OWN);
             }
         }
         tsrs_core::goslices::sort_func(&mut entries, |a, b| {
@@ -4046,6 +4051,7 @@ impl Checker {
         lazy: P<SharedMemberSlots>,
         key: HashedName<'_>,
     ) -> Option<P<Symbol>> {
+        self.lazy_member_stats.member_lookups += 1;
         let i = lazy.layout.find(key)?;
         if lazy.mapper.is_some() && i >= lazy.layout.named_count {
             return None;
@@ -4061,7 +4067,11 @@ impl Checker {
         alloc_vec((0..n).map(|i| self.get_lazy_member(lazy, i)).collect())
     }
 
-    fn get_lazy_member_table(&mut self, lazy: P<SharedMemberSlots>) -> Option<P<SymbolTable>> {
+    fn get_lazy_member_table(
+        &mut self,
+        t: P<Type>,
+        lazy: P<SharedMemberSlots>,
+    ) -> Option<P<SymbolTable>> {
         let n = if lazy.mapper.is_some() {
             lazy.layout.named_count
         } else {
@@ -4069,6 +4079,9 @@ impl Checker {
         };
         if n == 0 {
             return None;
+        }
+        if t.as_structured_type().raw_properties().is_none() {
+            self.record_full_member_resolution(t);
         }
         let members = SymbolTable::with_capacity(n);
         for i in 0..n {
@@ -4082,9 +4095,20 @@ impl Checker {
         if let Some(properties) = data.raw_properties() {
             return properties;
         }
-        let properties = t.member_slots().map_or(&[][..], |lazy| self.get_lazy_properties(lazy));
+        let properties = t.member_slots().map_or(&[][..], |lazy| {
+            if data.members().is_none() {
+                self.record_full_member_resolution(t);
+            }
+            self.get_lazy_properties(lazy)
+        });
         data.set_properties(properties);
         properties
+    }
+
+    // Either complete view resolves the named slots. Count the first view on this type.
+    fn record_full_member_resolution(&mut self, t: P<Type>) {
+        self.lazy_member_stats.member_tables_resolved_in_full += 1;
+        self.lazy_member_stats.tuple_tables_resolved_in_full += u64::from(t.is_tuple_type());
     }
 
     pub(crate) fn property_count_of_structured_type(t: P<Type>) -> usize {
@@ -4095,11 +4119,13 @@ impl Checker {
         )
     }
 
-    pub(crate) fn every_property_has_flags(t: P<Type>, flags: SymbolFlags) -> bool {
+    pub(crate) fn every_property_has_flags(&mut self, t: P<Type>, flags: SymbolFlags) -> bool {
         let data = t.as_structured_type();
         let properties = data.raw_properties().unwrap_or_else(|| {
-            t.member_slots()
-                .map_or(&[], |lazy| &lazy.layout.symbols.get()[..lazy.layout.named_count])
+            t.member_slots().map_or(&[], |lazy| {
+                self.lazy_member_stats.member_every_property_queries += 1;
+                &lazy.layout.symbols.get()[..lazy.layout.named_count]
+            })
         });
         properties.iter().all(|property| property.flags().intersects(flags))
     }
@@ -4109,7 +4135,7 @@ impl Checker {
         if data.members().is_none()
             && let Some(lazy) = t.member_slots()
         {
-            data.set_members(self.get_lazy_member_table(lazy));
+            data.set_members(self.get_lazy_member_table(t, lazy));
         }
         data.members()
     }

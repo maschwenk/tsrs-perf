@@ -1442,7 +1442,7 @@ impl Checker {
             let result = t.as_structured_type().signatures().is_empty()
                 && t.as_structured_type().index_infos().is_empty()
                 && Self::property_count_of_structured_type(t) > 0
-                && Self::every_property_has_flags(t, SymbolFlags::Optional);
+                && self.every_property_has_flags(t, SymbolFlags::Optional);
             if t.object_flags_lazy().intersects(ObjectFlags::MembersResolved) {
                 t.object_flags.set(
                     t.object_flags_lazy()
@@ -2140,6 +2140,7 @@ impl Checker {
         let mut props_out = props_out;
         // Names and flags are known without resolving the members, so only resolve the ones reported or compared.
         let (properties, lazy) = self.get_property_shapes_of_type(target);
+        self.lazy_member_stats.unmatched_lazy_walks += u64::from(lazy.is_some());
         let mut found = found;
         let resolved_source = self.resolved_property_source(source);
         for (i, &target_prop) in properties.iter().enumerate() {

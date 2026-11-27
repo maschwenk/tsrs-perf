@@ -120,14 +120,31 @@ macro_rules! lazy_member_stats {
 }
 
 lazy_member_stats! {
-    member_table_declared_instantiated: "Shared-layout members instantiated",
+    member_tables_created: "Lazy member tables",
+    member_tables_resolved_in_full: "Lazy member tables resolved in full",
+    member_table_declared_members: "Lazy table declared members",
+    member_table_declared_instantiated: "Lazy table members instantiated",
+    member_lookups: "Lazy member lookups",
+    // Signatures and index infos now live on the resolved type. The lazy-table query paths are gone.
+    member_signature_queries: "Lazy signature queries",
+    member_index_info_queries: "Lazy index info queries",
+    member_every_property_queries: "Lazy every-property queries",
     mapped_tables_created: "Lazy mapped tables",
     mapped_tables_resolved_in_full: "Lazy mapped tables resolved in full",
     mapped_members_created: "Lazy mapped members created",
     mapped_member_lookups: "Lazy mapped member lookups",
     mapped_index_info_queries: "Lazy mapped index info queries",
     mapped_signature_early_returns: "Mapped signature early returns",
+    // The intersection walk now visits every constituent.
+    some_property_skipped_constituents: "somePropertyReducesToNever skips",
+    tuple_tables_created: "Lazy tuple tables",
+    tuple_tables_resolved_in_full: "Lazy tuple tables resolved in full",
     cond_mappers_avoided: "Conditional composite mappers avoided",
     prop_cache_copies_avoided: "Augmented property cache copies avoided",
     prop_cache_shared_hits: "Augmented lookups served by the other cache",
+    // Unmatched-property checks now retrieve the source symbol directly.
+    has_prop_queries: "Existence-only property queries",
+    has_prop_uninstantiated: "Existence answers from an uninstantiated member",
+    unmatched_lazy_walks: "Lazy property-order lists requested",
+    empty_lazy_queries: "Empty-object queries answered by lazy tables",
 }

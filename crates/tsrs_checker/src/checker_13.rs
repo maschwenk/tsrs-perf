@@ -1431,7 +1431,10 @@ impl Checker {
     }
 
     // checker.go:26951
-    pub(crate) fn is_empty_resolved_type(&self, t: P<Type>) -> bool {
+    pub(crate) fn is_empty_resolved_type(&mut self, t: P<Type>) -> bool {
+        if t.as_structured_type().raw_properties().is_none() && t.member_slots().is_some() {
+            self.lazy_member_stats.empty_lazy_queries += 1;
+        }
         t != self.any_function_type
             && Self::property_count_of_structured_type(t) == 0
             && t.as_structured_type().signatures().is_empty()
