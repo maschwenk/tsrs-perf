@@ -1239,7 +1239,7 @@ impl BuildTask {
                     )
                 })
                 .find(|root| !seen_roots.keys().contains(root.as_ref()))
-                .map(|root| root.into_owned())
+                .map(std::borrow::Cow::into_owned)
         };
         if let Some(root) = missing_root {
             // File was root file when project was built but its not any more
