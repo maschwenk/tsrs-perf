@@ -38,17 +38,33 @@ impl EmitInput<'_> {
 
     /// `report_diagnostic` of each diagnostic, in order.
     fn report_diagnostics(&self, diagnostics: &[P<tsrs_ast::Diagnostic>]) {
-        match self.format_diagnostic {
-            Some(format) => tsrs_compiler::diagnosticwriter::format_diagnostics_in_order(
-                diagnostics,
-                self.program.single_threaded(),
-                &**format,
-                &mut |out| self.write(&tsrs_core::utf8::from_utf8_lossy(out)),
-            ),
-            None => {
-                for &diagnostic in diagnostics {
-                    (self.report_diagnostic)(diagnostic);
-                }
+        report_diagnostic_list(
+            diagnostics,
+            self.program.single_threaded(),
+            self.report_diagnostic,
+            self.format_diagnostic,
+            &|text| self.write(text),
+        );
+    }
+}
+
+pub fn report_diagnostic_list(
+    diagnostics: &[P<tsrs_ast::Diagnostic>],
+    single_threaded: bool,
+    report: &DiagnosticReporter,
+    format: Option<&DiagnosticFormatter>,
+    write: &dyn Fn(&str),
+) {
+    match format {
+        Some(format) => tsrs_compiler::diagnosticwriter::format_diagnostics_in_order(
+            diagnostics,
+            single_threaded,
+            &**format,
+            &mut |out| write(&tsrs_core::utf8::from_utf8_lossy(out)),
+        ),
+        None => {
+            for &diagnostic in diagnostics {
+                report(diagnostic);
             }
         }
     }

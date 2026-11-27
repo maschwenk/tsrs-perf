@@ -66,8 +66,6 @@ pub struct ProgramOptions {
     /// with a fresh one (checkerpool.rs `retire_checker`; the CLI's `--noEmit` check, where no later pass needs the
     /// checker that checked a file).
     pub checker_recycling: bool,
-    /// The final whole-program CLI check may retire completed workers.
-    pub terminal_check: bool,
     /// tsrs-only: use virtual four-checker reporting sites and their incremental cache proof. API builds
     /// disable this to retain per-file diagnostics and Go-shaped build info; external pools opt out too.
     pub canonical_diagnostics: bool,
@@ -106,7 +104,6 @@ impl ProgramOptions {
             create_module_resolver: None,
             leaf_files: crate::fileregions::LeafMode::Off,
             checker_recycling: false,
-            terminal_check: false,
             canonical_diagnostics: true,
             checker_regions: false,
             checker_diagnostic_regions: false,
@@ -135,7 +132,6 @@ impl ProgramOptions {
             create_module_resolver,
             leaf_files: crate::fileregions::LeafMode::Off,
             checker_recycling: false,
-            terminal_check: false,
             canonical_diagnostics: true,
             checker_regions: false,
             checker_diagnostic_regions: false,
@@ -526,6 +522,34 @@ pub fn worker_pool() -> &'static rayon::ThreadPool {
 
 // program.go:305
 pub fn new_program(opts: ProgramOptions) -> &'static Program {
+    new_program_inner(opts, false)
+}
+
+/// Checks a fresh no-emit command without exposing its short-lived checkers to program clients.
+pub fn check_no_emit_command(
+    config: P<ParsedCommandLine>,
+    host: Arc<dyn CompilerHost>,
+) -> Vec<P<Diagnostic>> {
+    let opts = config.compiler_options().unwrap();
+    let terminal_check = opts.no_emit.is_true()
+        && !opts.get_emit_declarations()
+        && !opts.explain_files.is_true()
+        && !Checker::census_enabled()
+        && !tsrs_core::fast::enabled()
+        && tsrs_core::compat::go_compatible_history();
+    let program = new_program_inner(ProgramOptions::new(config, host), terminal_check);
+    let diagnostics = get_diagnostics_of_any_program(
+        &Context::default(),
+        program,
+        None,
+        false,
+        &mut |ctx, file| program.get_bind_diagnostics(ctx, file),
+        &mut |ctx, file| program.get_semantic_diagnostics(ctx, file),
+    );
+    sort_and_deduplicate_diagnostics(&diagnostics)
+}
+
+fn new_program_inner(opts: ProgramOptions, terminal_check: bool) -> &'static Program {
     let single_threaded = tsrs_core::NO_THREADS
         || opts
             .single_threaded
@@ -577,7 +601,7 @@ pub fn new_program(opts: ProgramOptions) -> &'static Program {
         tsgo_check_slots: OnceLock::new(),
         tsgo_import_adjacency: OnceLock::new(),
         checker_recycling: opts.checker_recycling,
-        terminal_check: opts.terminal_check,
+        terminal_check,
         canonical_diagnostics: opts.canonical_diagnostics,
         checker_regions: opts.checker_regions,
         checker_diagnostic_regions: opts.checker_diagnostic_regions,
