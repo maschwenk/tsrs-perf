@@ -24,6 +24,7 @@ mod default_emit;
 mod deferred_type_argument_check;
 mod document_identifier_trailing_slash;
 mod document_uri_trailing_slash_not_normalized;
+mod extended_diagnostics;
 mod flow_memo;
 mod free_leaf_files;
 mod generate_trace;
