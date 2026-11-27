@@ -217,35 +217,22 @@ pub fn compute_ecma_line_starts(text: &str) -> ECMALineStarts {
 /// Go returns an `iter.Seq`; here the positions are pushed to `yield_` until it returns false.
 pub fn compute_ecma_line_starts_seq(text: &str, mut yield_: impl FnMut(u32) -> bool) {
     let bytes = text.as_bytes();
-    let text_len = bytes.len();
-    let mut pos = 0usize;
-    let mut line_start = 0usize;
-    while pos < text_len {
-        let b = bytes[pos];
-        if b < 0x80 {
-            pos += 1;
-            match b {
-                b'\r' | b'\n' => {
-                    if b == b'\r' && pos < text_len && bytes[pos] == b'\n' {
-                        pos += 1;
-                    }
-                    if !yield_(line_start as u32) {
-                        return;
-                    }
-                    line_start = pos;
-                }
-                _ => {}
+    let mut line_start = 0;
+    for pos in memchr::memchr3_iter(b'\n', b'\r', 0xe2, bytes) {
+        let next = match bytes[pos] {
+            b'\n' => pos + 1,
+            b'\r' if bytes.get(pos + 1) != Some(&b'\n') => pos + 1,
+            0xe2 if bytes.get(pos + 1) == Some(&0x80)
+                && matches!(bytes.get(pos + 2), Some(0xa8 | 0xa9)) =>
+            {
+                pos + 3
             }
-        } else {
-            let (ch, size) = stringutil::decode_rune(&bytes[pos..]);
-            pos += size;
-            if stringutil::is_line_break(ch) {
-                if !yield_(line_start as u32) {
-                    return;
-                }
-                line_start = pos;
-            }
+            _ => continue,
+        };
+        if !yield_(line_start as u32) {
+            return;
         }
+        line_start = next;
     }
     yield_(line_start as u32);
 }
