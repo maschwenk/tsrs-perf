@@ -888,21 +888,19 @@ impl Checker {
         }
         let mut results: Vec<P<Symbol>> = Vec::new();
         if !containing_file.imports().is_empty() {
-            // Try to make an import using an import already in the enclosing file, if possible
+            // Each specifier is resolved at the same enclosing declaration. Its mode can depend on
+            // that node (including a resolution-mode override), so share it only within this scan.
+            let location_mode = std::cell::OnceCell::new();
             results.extend(containing_file.imports().iter().filter_map(|&import_ref| {
                 if ast::node_is_synthesized(import_ref) {
                     // Synthetic names can't be resolved by `resolveExternalModuleName` - they'll cause a debug assert if they error
                     return None;
                 }
-                let import_attributes_type =
-                    self.get_import_attributes_type_for_module_specifier(import_ref);
-                let resolved_module = self.resolve_external_module_name(
+                let resolved_module = self.resolve_import_for_symbol_container(
                     enclosing_declaration,
-                    import_ref, /*ignoreErrors*/
-                    true,
-                    import_attributes_type,
-                );
-                let resolved_module = resolved_module?;
+                    import_ref,
+                    &location_mode,
+                )?;
                 let ref_ = self.get_alias_for_symbol_in_container(resolved_module, symbol);
                 ref_?;
                 Some(resolved_module)

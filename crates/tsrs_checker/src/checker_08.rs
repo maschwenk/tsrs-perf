@@ -1,5 +1,6 @@
 use crate::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::OnceCell;
 use std::fmt::Display;
 use tsrs_ast as ast;
 use tsrs_ast::*;
@@ -181,22 +182,34 @@ impl Checker {
         is_for_augmentation: bool,
         import_attributes_type: Option<P<Type>>,
     ) -> Option<P<Symbol>> {
-        if let Some(module_reference_expression) = module_reference_expression
-            && ast::is_string_literal_like(module_reference_expression)
-        {
-            if module_reference_expression.parent().is_some_and(ast::is_source_phase_import) {
-                return None;
-            }
-            return self.resolve_external_module(
-                location,
-                module_reference_expression.text(),
-                module_not_found_error,
-                if ignore_errors { None } else { Some(module_reference_expression) },
-                is_for_augmentation,
-                import_attributes_type,
-            );
-        }
-        None
+        let module_reference = external_module_reference_text(module_reference_expression?)?;
+        self.resolve_external_module(
+            location,
+            module_reference,
+            module_not_found_error,
+            if ignore_errors { None } else { module_reference_expression },
+            is_for_augmentation,
+            import_attributes_type,
+        )
+    }
+
+    pub(crate) fn resolve_import_for_symbol_container(
+        &mut self,
+        enclosing_declaration: P<Node>,
+        import_ref: P<Node>,
+        location_mode: &OnceCell<(P<SourceFile>, ResolutionMode)>,
+    ) -> Option<P<Symbol>> {
+        let attributes = self.get_import_attributes_type_for_module_specifier(import_ref);
+        let module_reference = external_module_reference_text(import_ref)?;
+        self.resolve_external_module_with_context(
+            Some(enclosing_declaration),
+            module_reference,
+            None,
+            None,
+            false,
+            attributes,
+            Some(location_mode),
+        )
     }
 
     // checker.go:15372
@@ -245,33 +258,7 @@ impl Checker {
             .or_insert_with(|| self.program.get_source_file_for_resolved_module(file_name))
     }
 
-    // checker.go:15399
-    pub(crate) fn resolve_external_module(
-        &mut self,
-        location: Option<P<Node>>,
-        module_reference: &str,
-        module_not_found_error: Option<&'static Message>,
-        error_node: Option<P<Node>>,
-        is_for_augmentation: bool,
-        import_attributes_type: Option<P<Type>>,
-    ) -> Option<P<Symbol>> {
-        if error_node.is_some() && module_reference.starts_with("@types/") {
-            let without_at_type_prefix = &module_reference["@types/".len()..];
-            self.error(error_node, &diagnostics::CANNOT_IMPORT_TYPE_DECLARATION_FILES_CONSIDER_IMPORTING_0_INSTEAD_OF_1, &[&without_at_type_prefix, &module_reference]);
-        }
-        let import_attributes_type = import_attributes_type.unwrap_or(self.empty_object_type);
-
-        let ambient_module =
-            self.try_find_ambient_module(module_reference, true /*withAugmentations*/);
-        if ambient_module.is_some() {
-            return self.try_resolve_pattern_ambient_module(
-                ambient_module,
-                module_reference,
-                import_attributes_type,
-            );
-        }
-
-        let location = location.unwrap();
+    fn external_module_location_mode(&self, location: P<Node>) -> (P<SourceFile>, ResolutionMode) {
         let importing_source_file = ast::get_source_file_of_node(location).unwrap();
         let mut context_specifier: Option<P<Node>> = None;
 
@@ -325,6 +312,61 @@ impl Checker {
                 self.program.get_mode_for_usage_location(importing_source_file, cs)
             }
             _ => self.program.get_default_resolution_mode_for_file(importing_source_file),
+        };
+        (importing_source_file, mode)
+    }
+
+    // checker.go:15399
+    pub(crate) fn resolve_external_module(
+        &mut self,
+        location: Option<P<Node>>,
+        module_reference: &str,
+        module_not_found_error: Option<&'static Message>,
+        error_node: Option<P<Node>>,
+        is_for_augmentation: bool,
+        import_attributes_type: Option<P<Type>>,
+    ) -> Option<P<Symbol>> {
+        self.resolve_external_module_with_context(
+            location,
+            module_reference,
+            module_not_found_error,
+            error_node,
+            is_for_augmentation,
+            import_attributes_type,
+            None,
+        )
+    }
+
+    fn resolve_external_module_with_context(
+        &mut self,
+        location: Option<P<Node>>,
+        module_reference: &str,
+        module_not_found_error: Option<&'static Message>,
+        error_node: Option<P<Node>>,
+        is_for_augmentation: bool,
+        import_attributes_type: Option<P<Type>>,
+        location_mode: Option<&OnceCell<(P<SourceFile>, ResolutionMode)>>,
+    ) -> Option<P<Symbol>> {
+        if error_node.is_some() && module_reference.starts_with("@types/") {
+            let without_at_type_prefix = &module_reference["@types/".len()..];
+            self.error(error_node, &diagnostics::CANNOT_IMPORT_TYPE_DECLARATION_FILES_CONSIDER_IMPORTING_0_INSTEAD_OF_1, &[&without_at_type_prefix, &module_reference]);
+        }
+        let import_attributes_type = import_attributes_type.unwrap_or(self.empty_object_type);
+
+        let ambient_module =
+            self.try_find_ambient_module(module_reference, true /*withAugmentations*/);
+        if ambient_module.is_some() {
+            return self.try_resolve_pattern_ambient_module(
+                ambient_module,
+                module_reference,
+                import_attributes_type,
+            );
+        }
+
+        let location = location.unwrap();
+        let (importing_source_file, mode) = match location_mode {
+            Some(cached) => *cached.get_or_init(|| self.external_module_location_mode(location)),
+            None => self.external_module_location_mode(location),
         };
 
         let resolved_module =
@@ -801,6 +843,16 @@ impl Checker {
             }
         }
         resolved_symbol
+    }
+}
+
+fn external_module_reference_text(reference: P<Node>) -> Option<&'static str> {
+    if ast::is_string_literal_like(reference)
+        && !reference.parent().is_some_and(ast::is_source_phase_import)
+    {
+        Some(reference.text())
+    } else {
+        None
     }
 }
 
