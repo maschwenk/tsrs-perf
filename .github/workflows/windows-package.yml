@@ -1,0 +1,79 @@
+name: Installed tsrs package on Windows
+on:
+  push:
+    branches:
+      - max/perf-npm-entry-1127-evidence
+    paths:
+      - .github/workflows/windows-package.yml
+permissions:
+  contents: read
+jobs:
+  consumer:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            arch: x64
+            triple: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            arch: arm64
+            triple: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 708c135a2b7b185ca11012fdc2c44a32869e4a98
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 26.13.1
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Pack the exact launcher with the published Windows native executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          node -p "process.version + ' ' + process.platform + ' ' + process.arch"
+          if ((node -p process.arch) -ne "${{ matrix.arch }}") { throw "Wrong architecture" }
+          npm.cmd install --global pnpm@12.15.0
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pnpm.cmd install --frozen-lockfile
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $native = Join-Path $env:RUNNER_TEMP "windows native ü"
+          New-Item -Type Directory -Path $native | Out-Null
+          $tgz = npm.cmd pack --silent --ignore-scripts --pack-destination "$native" "@tsrs/win32-${{ matrix.arch }}@7.1.0-beta.tsrs5"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          tar -xf "$native/$tgz" -C "$native" package/tsrs.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-FileHash "$native/package/tsrs.exe"
+          node npm/build.mjs --binary "${{ matrix.triple }}=$native/package/tsrs.exe" --pack
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Exercise the packed CLI and SDK
+        shell: pwsh
+        env:
+          npm_config_ignore_scripts: "true"
+        run: |
+          node npm/sdk/smoke-consumer.mjs --noembed --cli-only
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Run the npm command shim from an ordinary scripts-disabled install
+        shell: pwsh
+        run: |
+          $main = (Resolve-Path "npm/dist/tsrs-7*.tgz").Path
+          $test = Join-Path $env:RUNNER_TEMP "installed consumer ü"
+          New-Item -Type Directory -Path $test | Out-Null
+          Set-Location $test
+          '{"name":"consumer","private":true}' | Set-Content -Encoding utf8 package.json
+          npm.cmd install --ignore-scripts --no-fund --no-audit "$main"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .\node_modules\.bin\tsrs.cmd --version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          'const n: number = "no";' | Set-Content -Encoding utf8 "bad ü.ts"
+          $diagnostic = .\node_modules\.bin\tsrs.cmd --ignoreConfig --noEmit --pretty false "bad ü.ts"
+          if ($LASTEXITCODE -ne 2 -or ($diagnostic -join "") -notmatch "TS2322") { throw "Missing diagnostic or wrong exit" }
+          $env:TSRS_BINARY = "$test/missing ü.exe"
+          $failure = .\node_modules\.bin\tsrs.cmd --version 2>&1
+          if ($LASTEXITCODE -ne 1 -or ($failure -join "") -notmatch "which does not exist") { throw "Missing override error" }
+          Write-Host "Installed .cmd, Unicode argument, diagnostic exit 2, and override error exit 1 passed"
+          exit 0
