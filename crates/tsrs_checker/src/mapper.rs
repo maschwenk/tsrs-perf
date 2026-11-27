@@ -25,7 +25,7 @@ pub enum TypeMapperKind {
 /// to a `RareTypeMapper`. `data()` decodes a mapper into the `TypeMapperData` view that the code matches on.
 pub struct TypeMapper {
     first: MapperWord,
-    // Also holds the escaped bit (`ESCAPED`, notes/mem-recycle.md) in bit 2, which every payload leaves free.
+    // Also holds the escape bit and, for packed arrays, the source-order bit.
     second: std::cell::Cell<MapperWord>,
 }
 
@@ -108,6 +108,14 @@ const TAG_RARE: u64 = 6 << TAG_SHIFT;
 const ESCAPED: u64 = 0b1000 << TAG_SHIFT;
 #[cfg(target_pointer_width = "32")]
 const ADDR_MASK: u64 = (1 << 33) - 1;
+
+// The target slice decoder ignores this bit on both architectures.
+#[cfg(target_pointer_width = "64")]
+const ORDERED_SOURCES: MapperWord = 1;
+#[cfg(target_pointer_width = "32")]
+const ORDERED_SOURCES: MapperWord = 1 << TAG_SHIFT;
+const _: () =
+    assert!(ORDERED_SOURCES & (ADDR_MASK | ESCAPED) == 0 && ORDERED_SOURCES >> LEN_SHIFT == 0);
 
 /// A decoded mapper (the Go mapper data structs).
 #[derive(Clone, Copy)]
@@ -302,6 +310,13 @@ impl TypeMapper {
                 }
             }
             TypeMapperData::Array { sources, targets } => {
+                if self.second.get() & ORDERED_SOURCES != 0 {
+                    // A strictly increasing list has at most one match. Check the handle as in the linear search.
+                    return match sources.binary_search_by_key(&t.id, |s| s.id) {
+                        Ok(i) if sources[i] == t => targets[i],
+                        _ => t,
+                    };
+                }
                 if let Some(result) = sources
                     .iter()
                     .enumerate()
@@ -608,10 +623,19 @@ pub fn new_array_type_mapper(
 ) -> P<TypeMapper> {
     crate::sitecount::hit("mapper", "array");
     match (pack_slice(sources), pack_slice(targets)) {
-        (Some(first), Some(second)) => P::new_recycled(TypeMapper {
-            first: first | TAG_ARRAY,
-            second: std::cell::Cell::new(second),
-        }),
+        (Some(first), Some(second)) => {
+            // Long tuple mappers repeatedly look up every element in the same immutable source list.
+            let ordered =
+                sources.len() >= 32 && sources.windows(2).all(|pair| pair[0].id < pair[1].id);
+            P::new_recycled(TypeMapper {
+                first: first | TAG_ARRAY,
+                second: std::cell::Cell::new(if ordered {
+                    second | ORDERED_SOURCES
+                } else {
+                    second
+                }),
+            })
+        }
         _ => TypeMapper::alloc_rare(RareTypeMapper::Array { sources, targets }),
     }
 }

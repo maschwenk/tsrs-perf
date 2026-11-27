@@ -1,0 +1,3 @@
+a.ts(20,7): error TS2322: Type '[0, 16, 31, "extra", 0]' is not assignable to type '[0, 31, 16, "extra", 0]'.
+  Type at position 1 in source is not compatible with type at position 1 in target.
+    Type '16' is not assignable to type '31'.
