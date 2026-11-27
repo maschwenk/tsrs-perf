@@ -125,6 +125,7 @@ pub enum TypeMapperData {
 /// The mapper kinds that are rare enough to live out of line.
 enum RareTypeMapper {
     Array { sources: &'static [P<Type>], targets: &'static [P<Type>] },
+    OrderedArray { sources: &'static [P<Type>], targets: &'static [P<Type>] },
     ArrayToSingle { sources: &'static [P<Type>], target: P<Type> },
     Deferred(DeferredTypeMapper),
     Function(fn(&mut Checker, P<Type>) -> P<Type>),
@@ -241,6 +242,11 @@ impl TypeMapper {
     /// The mapper's kind and payload.
     #[inline]
     pub fn data(&self) -> TypeMapperData {
+        self.data_with_array_order(&mut false)
+    }
+
+    #[inline]
+    fn data_with_array_order(&self, ordered: &mut bool) -> TypeMapperData {
         let second = self.second.get();
         // SAFETY: the words were encoded for this tag by the constructors below.
         unsafe {
@@ -270,6 +276,10 @@ impl TypeMapper {
                     RareTypeMapper::Array { sources, targets } => {
                         TypeMapperData::Array { sources, targets }
                     }
+                    RareTypeMapper::OrderedArray { sources, targets } => {
+                        *ordered = true;
+                        TypeMapperData::Array { sources, targets }
+                    }
                     RareTypeMapper::ArrayToSingle { sources, target } => {
                         TypeMapperData::ArrayToSingle { sources, target: *target }
                     }
@@ -293,7 +303,8 @@ impl TypeMapper {
     }
 
     pub(crate) fn map(&self, c: &mut Checker, t: P<Type>) -> P<Type> {
-        match self.data() {
+        let mut ordered = false;
+        match self.data_with_array_order(&mut ordered) {
             TypeMapperData::Simple { source, target } => {
                 if t == source {
                     target
@@ -302,6 +313,12 @@ impl TypeMapper {
                 }
             }
             TypeMapperData::Array { sources, targets } => {
+                if ordered {
+                    return match sources.binary_search_by_key(&t.id, |source| source.id) {
+                        Ok(i) if sources[i] == t => targets[i],
+                        _ => t,
+                    };
+                }
                 if let Some(result) = sources
                     .iter()
                     .enumerate()
@@ -607,6 +624,9 @@ pub fn new_array_type_mapper(
     targets: &'static [P<Type>],
 ) -> P<TypeMapper> {
     crate::sitecount::hit("mapper", "array");
+    if sources.len() >= 32 && sources.windows(2).all(|pair| pair[0].id < pair[1].id) {
+        return TypeMapper::alloc_rare(RareTypeMapper::OrderedArray { sources, targets });
+    }
     match (pack_slice(sources), pack_slice(targets)) {
         (Some(first), Some(second)) => P::new_recycled(TypeMapper {
             first: first | TAG_ARRAY,
