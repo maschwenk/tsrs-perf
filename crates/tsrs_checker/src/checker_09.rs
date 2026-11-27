@@ -4154,6 +4154,10 @@ impl Checker {
         t: P<Type>,
         key: HashedName<'_>,
     ) -> Option<P<Symbol>> {
+        // Eager resolution installs the member table directly, including for mapped types.
+        if !self.lazy_members {
+            return self.resolve_structured_type_members(t).members()?.lookup_hashed(key);
+        }
         if t.object_flags().intersects(ObjectFlags::Mapped)
             && !is_reserved_member_name(key.as_str())
             && let Some(lazy) = self.get_lazy_mapped_table(t)
