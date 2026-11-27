@@ -491,6 +491,8 @@ pub struct PoolState {
     pub associations: Vec<usize>,
     // Estimated work per program file (checked_file_weights), what stealing balances.
     weights: Vec<i64>,
+    // The deep files (deep_files), by program file index; empty when none are marked.
+    deep: Vec<u32>,
     // TSRS_FILE_TIMES only: (file, checker, seconds, thread CPU seconds) per checked file, in completion order.
     file_times: Mutex<Vec<(P<SourceFile>, usize, f64, f64)>>,
     // Cost cache only: (file, thread CPU seconds) per checked file, per checker pass.
@@ -576,8 +578,10 @@ pub struct CheckerPoolImpl {
     checker_count: usize,
     single_threaded: bool,
     state: OnceLock<PoolState>,
-    // tsrs-only: the file assignment of the pool of the program this one reuses (`inherited_associations`).
+    // tsrs-only: the file assignment of the pool of the program this one reuses (`inherited_associations`), and its
+    // deep files: the import graph is the same.
     pub inherited_associations: Option<Vec<usize>>,
+    inherited_deep: Vec<u32>,
 }
 
 /*
@@ -813,14 +817,16 @@ impl CheckerPoolImpl {
         // Go `max(min(checkerCount, len(files), 256), 1)` on int: a negative or zero count is one checker.
         let checker_count = checker_count.min(program.files.len() as i64).clamp(1, 256) as usize;
 
-        let inherited_associations =
-            previous.and_then(|previous| inherited_associations(program, checker_count, previous));
+        let (inherited_associations, inherited_deep) = previous
+            .and_then(|previous| inherited_associations(program, checker_count, previous))
+            .map_or((None, Vec::new()), |(associations, deep)| (Some(associations), deep));
         CheckerPoolImpl {
             program,
             checker_count,
             single_threaded: program.single_threaded() || checker_count == 1,
             state: OnceLock::new(),
             inherited_associations,
+            inherited_deep,
         }
     }
 
@@ -903,19 +909,19 @@ impl CheckerPoolImpl {
                         .into_boxed_slice(),
                 );
                 create_start.record("Checkers: create");
-                let associations = match &self.inherited_associations {
-                    Some(associations) => associations.clone(),
+                let (associations, deep) = match &self.inherited_associations {
+                    Some(associations) => (associations.clone(), self.inherited_deep.clone()),
                     None => tsrs_core::phases::time(
                         program.options().diagnostics_enabled(),
                         "Checkers: assign files",
                         || compute_associations(program, self.checker_count),
                     ),
                 };
-                (checkers, associations)
+                (checkers, associations, deep)
             };
             // tsrs-only: the CLI's leaf classification reads only the loaded program; it runs meanwhile
             // (fileregions.rs `prepare`).
-            let (checkers, associations) =
+            let (checkers, associations, deep) =
                 if program.leaf_files != crate::fileregions::LeafMode::Off && !self.single_threaded
                 {
                     std::thread::scope(|s| {
@@ -943,6 +949,7 @@ impl CheckerPoolImpl {
                 owners,
                 associations: associations_for_reuse,
                 weights,
+                deep,
                 file_times: Mutex::new(Vec::new()),
                 file_cpu: Mutex::new(Vec::new()),
                 recycle,
@@ -1063,6 +1070,8 @@ impl CheckerPoolImpl {
             Some(w) => w,
             None => file_weight(i),
         };
+        // Per queue: how many positions at its front thieves leave to the owner (the deep files).
+        let mut pinned = vec![0usize; n];
         if steal {
             // Each owner starts with the files that could be the pass's tail (heavy_files_first).
             let total: u64 = positions.iter().flatten().map(|&i| weight(i)).sum();
@@ -1070,14 +1079,40 @@ impl CheckerPoolImpl {
             for position in &mut positions {
                 heavy_files_first(position, threshold, weight);
             }
+            if !state.deep.is_empty() {
+                // Before them, its deep files (deep_files), which thieves leave to it, up to half an average share.
+                let mut deep_file = vec![false; state.owners.len()];
+                for &fi in &state.deep {
+                    deep_file[fi as usize] = true;
+                }
+                let is_deep = |i: u32| {
+                    (i as usize) < files.len()
+                        && index_of[i as usize].is_some_and(|fi| deep_file[fi])
+                };
+                let limit = total / (active.len() as u64 * 2);
+                for (p, pinned) in positions.iter_mut().zip(&mut pinned) {
+                    let (deep, rest): (Vec<u32>, Vec<u32>) = p.iter().partition(|&&i| is_deep(i));
+                    let mut sum = 0;
+                    *pinned = deep
+                        .iter()
+                        .take_while(|&&i| {
+                            sum += weight(i);
+                            sum <= limit
+                        })
+                        .count();
+                    *p = deep;
+                    p.extend(rest);
+                }
+            }
             if state.recycle && leaves_first() {
                 // With checkers retired under a memory target their memory stops growing, and what the front end holds sets
                 // the peak: the leaves' trees go once they are checked, so each checker checks its leaves first
-                // (after the heavy files), keeping its files' order otherwise.
+                // (after the deep and heavy files), keeping its files' order otherwise.
                 let is_leaf =
                     |i: u32| (i as usize) < files.len() && files[i as usize].is_check_leaf();
-                for p in &mut positions {
-                    let heavy = p.iter().take_while(|&&i| weight(i) > threshold).count();
+                for (p, &pinned) in positions.iter_mut().zip(&pinned) {
+                    let heavy =
+                        pinned + p[pinned..].iter().take_while(|&&i| weight(i) > threshold).count();
                     let (leaves, rest): (Vec<u32>, Vec<u32>) =
                         p[heavy..].iter().partition(|&&i| is_leaf(i));
                     p.truncate(heavy);
@@ -1096,8 +1131,11 @@ impl CheckerPoolImpl {
                 crate::sharedgraph::start_seed(self.program, state.weights.clone(), state.recycle);
             });
         }
-        let queues: Vec<FileQueue> =
-            positions.into_iter().map(|p| FileQueue::new(p, weight)).collect();
+        let queues: Vec<FileQueue> = positions
+            .into_iter()
+            .zip(pinned)
+            .map(|(p, pinned)| FileQueue::new(p, pinned, weight))
+            .collect();
         // `--maxMemory`: each checker's region size after its last file, to retire the largest.
         let region_sizes: Vec<std::sync::atomic::AtomicUsize> =
             std::iter::repeat_with(|| std::sync::atomic::AtomicUsize::new(0)).take(n).collect();
@@ -1463,6 +1501,8 @@ fn plan_splits(
 pub struct FileQueue {
     positions: Vec<u32>,
     prefix: Vec<u64>,
+    // positions[..pinned] are the owner's: thieves do not take them.
+    pinned: u32,
     range: std::sync::atomic::AtomicU64,
     // A bit per checker (index below 64) that steals from this queue now (max_thieves_per_queue).
     thieves: std::sync::atomic::AtomicU64,
@@ -1471,7 +1511,9 @@ pub struct FileQueue {
 const QUEUE_LOW: u64 = u32::MAX as u64;
 
 impl FileQueue {
-    pub fn new(positions: Vec<u32>, weight: impl Fn(u32) -> u64) -> FileQueue {
+    // The first `pinned` positions are the owner's alone.
+    pub fn new(positions: Vec<u32>, pinned: usize, weight: impl Fn(u32) -> u64) -> FileQueue {
+        debug_assert!(pinned <= positions.len());
         let mut prefix = Vec::with_capacity(positions.len() + 1);
         let mut sum = 0;
         prefix.push(0);
@@ -1483,15 +1525,25 @@ impl FileQueue {
         FileQueue {
             positions,
             prefix,
+            pinned: pinned as u32,
             range: std::sync::atomic::AtomicU64::new(len << 32),
             thieves: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     pub fn remaining(&self) -> u64 {
+        self.left(0)
+    }
+
+    // The work left that a thief may take: `remaining` without the pinned positions.
+    fn stealable(&self) -> u64 {
+        self.left(self.pinned as usize)
+    }
+
+    fn left(&self, floor: usize) -> u64 {
         // A heuristic read: a stale value only picks a different victim.
         let r = self.range.load(std::sync::atomic::Ordering::Relaxed);
-        let (front, back) = ((r & QUEUE_LOW) as usize, (r >> 32) as usize);
+        let (front, back) = (((r & QUEUE_LOW) as usize).max(floor), (r >> 32) as usize);
         if front < back { self.prefix[back] - self.prefix[front] } else { 0 }
     }
 
@@ -1541,6 +1593,7 @@ impl FileQueue {
         }
     }
 
+    // The owner takes from the front; a thief from the back, down to the pinned positions.
     fn take(&self, front: bool) -> Option<usize> {
         // The compare-exchange on `range` alone decides who gets a position; nothing else is published through it.
         // As above: the exchange only claims the position.
@@ -1550,7 +1603,12 @@ impl FileQueue {
                 std::sync::atomic::Ordering::Relaxed, // Only claims the position; publishes no data.
                 std::sync::atomic::Ordering::Relaxed, // A failed claim only retries the range value.
                 |r| {
-                    ((r & QUEUE_LOW) < (r >> 32)).then(|| if front { r + 1 } else { r - (1 << 32) })
+                    let floor = if front {
+                        r & QUEUE_LOW
+                    } else {
+                        (r & QUEUE_LOW).max(u64::from(self.pinned))
+                    };
+                    (floor < (r >> 32)).then(|| if front { r + 1 } else { r - (1 << 32) })
                 },
             )
             .ok()?;
@@ -1613,7 +1671,7 @@ pub fn queues_next(
         return None;
     }
     loop {
-        if queues.iter().all(|q| q.remaining() == 0) {
+        if queues.iter().all(|q| q.stealable() == 0) {
             // Queues whose remaining files weigh 0 (unchecked declaration files) are still drained by their owners.
             return queues
                 .iter()
@@ -1624,7 +1682,7 @@ pub fn queues_next(
             .iter()
             .enumerate()
             .filter(|&(c, q)| c != me && q.admits(me, max_thieves))
-            .map(|(c, q)| (c, q.remaining()))
+            .map(|(c, q)| (c, q.stealable()))
             .max_by_key(|&(c, left)| (left, std::cmp::Reverse(c)))?;
         if left == 0 {
             // The queues with work left have their thieves; their owners finish them.
@@ -1636,7 +1694,7 @@ pub fn queues_next(
         if let Some(last) = last_victim.as_deref_mut() {
             if *last != usize::MAX
                 && queues[*last].admits(me, max_thieves)
-                && queues[*last].remaining() * 2 >= left
+                && queues[*last].stealable() * 2 >= left
             {
                 victim = *last;
             }
@@ -1757,12 +1815,12 @@ fn inherited_associations(
     program: &Program,
     checker_count: usize,
     previous: &CheckerPoolImpl,
-) -> Option<Vec<usize>> {
+) -> Option<(Vec<usize>, Vec<u32>)> {
     let state = previous.state.get()?;
     let reusable = matches!(checker_assignment(), CheckerAssignment::Locality)
         && previous.checker_count == checker_count
         && state.associations.len() == program.files.len();
-    reusable.then(|| state.associations.clone())
+    reusable.then(|| (state.associations.clone(), state.deep.clone()))
 }
 
 // tsrs-only: where tsgo's compiler pool at its default checker count (`newCheckerPool`) type checks each file: the
@@ -1792,18 +1850,21 @@ pub fn tsgo_default_check_slots(program: &Program) -> FxHashMap<P<SourceFile>, (
         .collect()
 }
 
-fn compute_associations(program: &Program, checker_count: usize) -> Vec<usize> {
+// The static assignment, and with the locality assignment the deep files (deep_files).
+fn compute_associations(program: &Program, checker_count: usize) -> (Vec<usize>, Vec<u32>) {
     if checker_count <= 1 {
-        return vec![0; program.files.len()];
+        return (vec![0; program.files.len()], Vec::new());
     }
-    let associations = match checker_assignment() {
-        CheckerAssignment::Go => go_associations(program, checker_count, true),
+    let (associations, deep) = match checker_assignment() {
+        CheckerAssignment::Go => (go_associations(program, checker_count, true), Vec::new()),
         CheckerAssignment::Locality => locality_associations(program, checker_count),
         CheckerAssignment::Random(seed) => {
             let mut state = seed;
-            std::iter::repeat_with(|| (splitmix64(&mut state) % checker_count as u64) as usize)
-                .take(program.files.len())
-                .collect()
+            let associations =
+                std::iter::repeat_with(|| (splitmix64(&mut state) % checker_count as u64) as usize)
+                    .take(program.files.len())
+                    .collect();
+            (associations, Vec::new())
         }
         CheckerAssignment::File(path) => {
             let text = tsrs_core::utf8::read_to_string(path).expect("TSRS_CHECKER_ASSIGNMENT file");
@@ -1816,13 +1877,13 @@ fn compute_associations(program: &Program, checker_count: usize) -> Vec<usize> {
                 program.files.len(),
                 "TSRS_CHECKER_ASSIGNMENT file length"
             );
-            associations
+            (associations, Vec::new())
         }
     };
     if let Ok(path) = std::env::var("TSRS_ASSIGNMENT_DUMP") {
         dump_assignment_inputs(program, &associations, &path);
     }
-    associations
+    (associations, deep)
 }
 
 // tsrs-only, opt-in: `--checkerCostCache <file>` (CLI) or TSRS_CHECKER_COST_CACHE=<file>. The locality
@@ -2101,7 +2162,7 @@ pub fn checker_count_upper_bound(
 // edges between groups, 101% load cap) in descending weight order, largest first. Deterministic: paths are
 // sorted, groups are numbered in path order, ties are broken by index. Unchecked declaration files go to
 // checker 0 (no checker ever runs over them).
-fn locality_associations(program: &Program, checker_count: usize) -> Vec<usize> {
+fn locality_associations(program: &Program, checker_count: usize) -> (Vec<usize>, Vec<u32>) {
     // tsrs-only: the import graph (built on the worker pool) does not depend on the groups; it is built while they
     // are formed.
     if program.single_threaded() {
@@ -2119,13 +2180,13 @@ fn locality_associations_with(
     program: &Program,
     checker_count: usize,
     import_targets: impl FnOnce() -> Vec<Vec<usize>>,
-) -> Vec<usize> {
+) -> (Vec<usize>, Vec<u32>) {
     let files = &program.files;
     let weights = checked_file_weights(program);
     let mut order: Vec<usize> = (0..files.len()).filter(|&i| weights[i] > 0).collect();
     let mut associations = vec![0usize; files.len()];
     if order.is_empty() {
-        return associations;
+        return (associations, Vec::new());
     }
     // A total order (ties by index), so the parallel sort is deterministic.
     let by_path = |&a: &usize, &b: &usize| files[a].path().cmp(files[b].path()).then(a.cmp(&b));
@@ -2258,7 +2319,8 @@ fn locality_associations_with(
     for &i in &order {
         associations[i] = group_associations[group_of_file[i]];
     }
-    associations
+    let deep = deep_files(&import_targets, &weights, &associations);
+    (associations, deep)
 }
 
 struct MeasuredCosts {
@@ -2512,4 +2574,116 @@ fn undirected(targets: &[Vec<usize>]) -> Vec<Vec<usize>> {
         }
     }
     adjacent_files
+}
+
+// tsrs-only: the length of the longest chain of in-program imports below each file. The files of a strongly connected
+// component (an import cycle) share a depth: one more than the deepest component they import from outside it.
+// Iterative Tarjan: components complete in reverse topological order, so every component a completed one imports
+// from has its depth already.
+pub fn import_depths(targets: &[Vec<usize>]) -> Vec<u32> {
+    const NONE: u32 = u32::MAX;
+    let n = targets.len();
+    let mut index = vec![NONE; n];
+    let mut low = vec![0u32; n];
+    let mut on_stack = vec![false; n];
+    let mut component = vec![NONE; n];
+    let mut component_depth: Vec<u32> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    // (file, next target to visit)
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    let mut next = 0u32;
+    for root in 0..n {
+        if index[root] != NONE {
+            continue;
+        }
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        work.push((root, 0));
+        while let Some(top) = work.last_mut() {
+            let (v, k) = *top;
+            if let Some(&w) = targets[v].get(k) {
+                top.1 += 1;
+                if index[w] == NONE {
+                    index[w] = next;
+                    low[w] = next;
+                    next += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(u, _)) = work.last() {
+                low[u] = low[u].min(low[v]);
+            }
+            if low[v] == index[v] {
+                let c = component_depth.len() as u32;
+                let start = stack.iter().rposition(|&x| x == v).unwrap();
+                for &x in &stack[start..] {
+                    component[x] = c;
+                    on_stack[x] = false;
+                }
+                let mut depth = 0;
+                for &x in &stack[start..] {
+                    for &w in &targets[x] {
+                        if component[w] != c {
+                            depth = depth.max(component_depth[component[w] as usize] + 1);
+                        }
+                    }
+                }
+                stack.truncate(start);
+                component_depth.push(depth);
+            }
+        }
+    }
+    component.iter().map(|&c| component_depth[c as usize]).collect()
+}
+
+// tsrs-only: the files at the top of the import graph, which their owner checks first and
+// keeps from thieves. Program order is dependencies first, so the back of a queue, where thieves take, holds the files
+// that import the most of the program (entry points, composition roots, the tests of whole services); a thief that
+// takes one builds the types of everything it imports again, which the owner, checking that neighbourhood, builds
+// once. A deep file is a checked file (weight above 0) whose import depth (`import_depths`) is at least
+// DEEP_FILE_DEPTH of the deepest checked file's, plus the checked files of the same checker that it imports directly.
+// By program file index. `TSRS_DEEP_FILES=0` turns this off, for A/B runs on one binary.
+fn deep_files(import_targets: &[Vec<usize>], weights: &[i64], associations: &[usize]) -> Vec<u32> {
+    if !deep_files_enabled() {
+        return Vec::new();
+    }
+    let depths = import_depths(import_targets);
+    let max = (0..weights.len()).filter(|&i| weights[i] > 0).map(|i| depths[i]).max().unwrap_or(0);
+    let min = ((f64::from(max) * DEEP_FILE_DEPTH).ceil() as u32).max(1);
+    let mut deep: Vec<u32> = (0..weights.len())
+        .filter(|&i| weights[i] > 0 && depths[i] >= min)
+        .map(|i| i as u32)
+        .collect();
+    let mut seen = vec![false; weights.len()];
+    for &d in &deep {
+        seen[d as usize] = true;
+    }
+    for k in 0..deep.len() {
+        let d = deep[k] as usize;
+        for &t in &import_targets[d] {
+            if !seen[t] && weights[t] > 0 && associations[t] == associations[d] {
+                seen[t] = true;
+                deep.push(t as u32);
+            }
+        }
+    }
+    deep
+}
+
+// A fraction of the deepest file's depth, not a number of levels below it: three levels marked 712 of webpack's 909
+// files.
+const DEEP_FILE_DEPTH: f64 = 0.95;
+
+fn deep_files_enabled() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| !std::env::var("TSRS_DEEP_FILES").is_ok_and(|v| v == "0"))
 }
