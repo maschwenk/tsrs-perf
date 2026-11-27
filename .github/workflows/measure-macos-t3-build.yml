@@ -1,0 +1,57 @@
+name: Build native macOS compilers for the t3code comparison
+on:
+  push:
+    branches: [max/bench-t3-macos-cli-1127]
+    paths: [.github/workflows/measure-macos-t3-build.yml]
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: macos-15
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arm: A, sha: e544f3895d5b3ac01b8bc1c457d192c585d334cd}
+          - {arm: B, sha: 20c0767123f2d66d3f8cbb5c62f26fe7e2a42381}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - name: Build the pinned release
+        env:
+          ARM: ${{ matrix.arm }}
+          SHA: ${{ matrix.sha }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/tsrs-target
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$SHA"
+          mkdir proof
+          {
+            date -u
+            sw_vers
+            uname -mrs
+            sysctl hw.ncpu hw.memsize machdep.cpu.brand_string
+            df -h /
+            git rev-parse HEAD
+            rustup toolchain install 1.100.0 --profile minimal
+            rustc +1.100.0 -vV
+            cargo +1.100.0 -V
+            clang --version
+            cargo +1.100.0 build --locked --release -p tsrs_cli
+            cp "$CARGO_TARGET_DIR/release/tsrs" "proof/$ARM"
+            file "proof/$ARM"
+            shasum -a 256 "proof/$ARM"
+            df -h /
+          } 2>&1 | tee "proof/build-$ARM.log"
+          (cd proof && shasum -a 256 "$ARM" > "$ARM.sha256")
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mac-compiler-${{ matrix.arm }}
+          path: proof/
+          if-no-files-found: warn
+          retention-days: 7
