@@ -3583,7 +3583,19 @@ impl TupleNormalizer {
                         return false;
                     }
                     // Spread variadic elements with tuple types into the resulting tuple.
-                    let spread_infos = t.target_tuple_type().element_infos();
+                    let spread = t.target_tuple_type();
+                    let spread_infos = &spread.element_infos()[..spread_types.len()];
+                    if spread.combined_flags.get() == ElementFlags::Required
+                        && spread_infos
+                            .last()
+                            .is_some_and(|info| info.flags == ElementFlags::Required)
+                    {
+                        // These elements keep their types and labels. Only the last required position moves.
+                        self.types.extend_from_slice(spread_types);
+                        self.infos.extend_from_slice(spread_infos);
+                        self.last_required_index = Some(self.types.len() - 1);
+                        continue;
+                    }
                     for (j, &s) in spread_types.iter().enumerate() {
                         self.add(c, s, spread_infos[j]);
                     }
@@ -3609,9 +3621,13 @@ impl TupleNormalizer {
             }
         }
         // Turn optional elements preceding the last required element into required elements
-        for i in 0..self.last_required_index.unwrap_or(0) {
-            if self.infos[i].flags.intersects(ElementFlags::Optional) {
-                self.infos[i].flags = ElementFlags::Required;
+        if let (Some(required), Some(optional_or_rest)) =
+            (self.last_required_index, self.last_optional_or_rest_index)
+        {
+            for info in &mut self.infos[..required.min(optional_or_rest + 1)] {
+                if info.flags.intersects(ElementFlags::Optional) {
+                    info.flags = ElementFlags::Required;
+                }
             }
         }
         if self
