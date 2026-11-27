@@ -580,20 +580,21 @@ impl EmitContext {
     }
 
     pub fn set_original_ex(&self, node: P<Node>, original: P<Node>, allow_overwrite: bool) {
-        let existing = self.original.borrow().get(&node).copied();
-        match existing {
-            None => {
-                self.original.borrow_mut().insert(node, original);
+        use std::collections::hash_map::Entry;
+
+        match self.original.borrow_mut().entry(node) {
+            Entry::Vacant(entry) => {
+                entry.insert(original);
                 let source = self.emit_nodes.borrow().get(&original).cloned();
                 if let Some(emit_node) = source {
                     self.emit_nodes.borrow_mut().entry(node).or_default().copy_from(&emit_node);
                 }
             }
-            Some(existing) => {
-                if !allow_overwrite && existing != original {
+            Entry::Occupied(mut entry) => {
+                if allow_overwrite {
+                    entry.insert(original);
+                } else if *entry.get() != original {
                     panic!("Original node already set.");
-                } else if allow_overwrite {
-                    self.original.borrow_mut().insert(node, original);
                 }
             }
         }
