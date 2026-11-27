@@ -1,9 +1,7 @@
 // One cold command. Run with node bench/cold-lexical-batch.mjs <program> [args...].
 import net from "node:net";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { fork } from "node:child_process";
 import { once } from "node:events";
 
 const [program, ...argv] = process.argv.slice(2);
@@ -11,27 +9,15 @@ if (!program) throw Error("expected a command");
 if (program !== "--serve") {
   const env = { ...process.env };
   delete env.TSRS_BATCH_SOCKET;
-  let directory, broker, timer;
-  try {
-    directory = fs.mkdtempSync(path.join(os.tmpdir(), "tsrs-batch-"));
-    broker = fork(import.meta.filename, ["--serve", directory, String(process.pid)], {
-      stdio: ["ignore", "ignore", "inherit", "ipc"],
-    });
-    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(["timeout"]), 2000); });
-    const [ready] = await Promise.race([once(broker, "message"), once(broker, "exit"), timeout]);
-    if (ready !== "ready") throw Error("batch broker unavailable");
-    broker.disconnect();
-    env.TSRS_BATCH_SOCKET = path.join(directory, "scanner.sock");
-  } catch {
-    broker?.kill();
-    if (directory) fs.rmSync(directory, { recursive: true, force: true });
-  } finally {
-    clearTimeout(timer);
+  if (process.platform === "linux" && fs.existsSync("/usr/bin/python3")) {
+    const launcher = path.join(import.meta.dirname, "cold-lexical-launch.py");
+    if (fs.existsSync(launcher)) {
+      process.execve("/usr/bin/python3", ["python3", launcher, process.execPath, import.meta.filename, program, ...argv], env);
+    }
   }
-  // Preserve the real command's PID, stdio, exit status and signals.
   process.execve("/usr/bin/env", ["env", "--", program, ...argv], env);
 }
-const [directory, parent] = argv;
+const [directory, parent, parentStart, readyFd] = argv;
 const socket = path.join(directory, "scanner.sock");
 const cache = new Map();
 const pending = new Set();
@@ -90,7 +76,8 @@ const server = net.createServer((peer) => {
 server.maxConnections = 32;
 server.listen(socket);
 await once(server, "listening");
-process.send("ready");
+fs.writeSync(Number(readyFd), "1");
+fs.closeSync(Number(readyFd));
 function finish() {
   if (process.env.TSRS_BATCH_STATS) fs.writeFileSync(process.env.TSRS_BATCH_STATS, JSON.stringify(metrics));
   server.close();
@@ -98,4 +85,13 @@ function finish() {
   process.exit(0);
 }
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.once(signal, finish);
-setInterval(() => { if (process.ppid !== Number(parent)) finish(); }, 20);
+function jobIsAlive() {
+  try {
+    const stat = fs.readFileSync(`/proc/${parent}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(") ") + 2).split(" ");
+    return fields[19] === parentStart && fields[0] !== "Z" && fields[0] !== "X" && fs.existsSync(directory);
+  } catch {
+    return false;
+  }
+}
+setInterval(() => { if (!jobIsAlive()) finish(); }, 20);
