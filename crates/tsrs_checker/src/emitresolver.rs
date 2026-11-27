@@ -33,7 +33,10 @@ impl EmitResolver {
     }
 
     fn node_builder(&self, c: &Checker) -> P<NodeBuilder> {
-        *self.request_node_builder.get_or_init(|| new_node_builder(c, self.emit_context))
+        // Declaration transforms consume the printed nodes, with no reverse identifier lookup.
+        *self.request_node_builder.get_or_init(|| {
+            crate::nodebuilder::new_node_builder_with_symbol_map(c, self.emit_context, None)
+        })
     }
 
     // emitresolver.go:53

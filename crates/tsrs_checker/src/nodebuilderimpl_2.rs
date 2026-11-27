@@ -3025,8 +3025,8 @@ impl NodeBuilderImpl {
         symbol: Option<P<Symbol>>,
     ) -> P<Node> {
         let id = self.f.new_identifier(self.f.alloc_text(text));
-        if let Some(symbol) = symbol {
-            self.id_to_symbol.borrow_mut().insert(id, symbol);
+        if let (Some(id_to_symbol), Some(symbol)) = (self.id_to_symbol, symbol) {
+            id_to_symbol.borrow_mut().insert(id, symbol);
         }
         id
     }

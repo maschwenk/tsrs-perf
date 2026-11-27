@@ -240,7 +240,8 @@ impl NodeBuilderImpl {
             let mut member_symbol: Option<P<Symbol>> = None;
             let member_name = m.name();
             if let Some(member_name) = member_name
-                && let Some(sym) = self.id_to_symbol.borrow().get(&member_name).copied()
+                && let Some(id_to_symbol) = self.id_to_symbol
+                && let Some(sym) = id_to_symbol.borrow().get(&member_name).copied()
             {
                 member_symbol = Some(sym);
             }

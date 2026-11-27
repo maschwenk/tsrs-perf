@@ -488,6 +488,17 @@ pub fn new_node_builder_ex(
     e: P<EmitContext>,
     id_to_symbol: Option<P<RefCell<FxHashMap<P<Node>, P<Symbol>>>>>,
 ) -> P<NodeBuilder> {
+    // Hover reads identifier bindings even when the caller did not supply a map.
+    let id_to_symbol = id_to_symbol
+        .unwrap_or_else(|| P::new_in(e.factory.is_scratch(), RefCell::new(FxHashMap::default())));
+    new_node_builder_with_symbol_map(ch, e, Some(id_to_symbol))
+}
+
+pub fn new_node_builder_with_symbol_map(
+    ch: &Checker,
+    e: P<EmitContext>,
+    id_to_symbol: Option<P<RefCell<FxHashMap<P<Node>, P<Symbol>>>>>,
+) -> P<NodeBuilder> {
     let impl_ = new_node_builder_impl(ch, e, id_to_symbol);
     P::new_in(
         e.factory.is_scratch(),
