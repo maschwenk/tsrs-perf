@@ -1269,6 +1269,7 @@ name = "tsrs_incremental"
 version = "7.1.0-beta.tsrs5"
 dependencies = [
  "bitflags",
+ "itoa",
  "rayon",
  "rustc-hash",
  "tsrs_ast",

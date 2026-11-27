@@ -127,3 +127,47 @@ fn marshal_streams_the_marshal_json_document() {
         }
     }
 }
+
+#[test]
+fn file_id_lists_keep_the_json_reader_contract() {
+    use tsrs_core::json;
+    let decode = |text| BuildInfo::unmarshal(text).map(|info| info.file_ids_list);
+    for (text, expected) in [
+        (
+            r#"{"fileIdsList":[[0,10,4294967295],[],[2]]}"#,
+            vec![vec![0, 10, u32::MAX], vec![], vec![2]],
+        ),
+        (r#"{"fileIdsList":[[1e2,-0,2.0],null]}"#, vec![vec![100, 0, 2], vec![]]),
+        (r#"{"extra":{"fileIdsList":[99]},"fileIdsList":null}"#, vec![]),
+        (r#"{"fileIds\u004cist":[[1],[2]]}"#, vec![vec![1], vec![2]]),
+    ] {
+        assert_eq!(decode(text).unwrap(), expected);
+    }
+    for text in [
+        r#"{"fileIdsList":[[1,]]}"#,
+        r#"{"fileIdsList":[[01]]}"#,
+        r#"{"fileIdsList":[[1e9999]]}"#,
+        r#"{"fileIdsList":[[1]],"fileIds\u004cist":[]}"#,
+        r#"{"fileIdsList":[[2]],"extra":{"a":1,"a":2}}"#,
+        r#"{"fileIdsList":[]} trailing"#,
+    ] {
+        assert_eq!(decode(text).unwrap_err(), json::unmarshal(text).unwrap_err());
+    }
+    for text in [
+        r#"{"fileIdsList":[[4294967296]]}"#,
+        r#"{"fileIdsList":[[0.5]]}"#,
+        r#"{"fileIdsList":[{"ids":[1]}]}"#,
+    ] {
+        assert_eq!(decode(text).unwrap_err(), "invalid fileIdsList");
+    }
+}
+
+#[test]
+fn file_info_union_only_reads_the_selected_signature() {
+    let text = r#"{"fileInfos":[{"version":"v","noSignature":true,"signature":13},{"version":"v","noSignature":"unknown","signature":"s"}]}"#;
+    let info = BuildInfo::unmarshal(text).unwrap();
+    assert_eq!(
+        info.marshal(),
+        r#"{"fileInfos":[{"version":"v","noSignature":true},{"version":"v","signature":"s"}]}"#
+    );
+}

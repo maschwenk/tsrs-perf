@@ -195,33 +195,36 @@ impl BuildInfoFileInfo {
         if let Value::String(v_signature) = data {
             return Ok(BuildInfoFileInfo { signature: v_signature.clone(), ..Default::default() });
         }
-        let no_signature = (|| -> Result<BuildInfoFileInfoNoSignature, String> {
+        let decode = || -> Result<Self, String> {
             let o = as_object(data)?;
-            Ok(BuildInfoFileInfoNoSignature {
-                version: get_string(o, "version")?,
-                no_signature: get_bool(o, "noSignature")?,
-                affects_global_scope: get_bool(o, "affectsGlobalScope")?,
-                implied_node_format: module_kind_from_i32(get_int(o, "impliedNodeFormat")?),
-            })
-        })();
-        match no_signature {
-            Ok(no_signature) if no_signature.no_signature => {
-                Ok(BuildInfoFileInfo { no_signature: Some(no_signature), ..Default::default() })
-            }
-            _ => {
-                let file_info = (|| -> Result<BuildInfoFileInfoWithSignature, String> {
-                    let o = as_object(data)?;
-                    Ok(BuildInfoFileInfoWithSignature {
-                        version: get_string(o, "version")?,
+            let version = get_string(o, "version")?;
+            let affects_global_scope = get_bool(o, "affectsGlobalScope")?;
+            let implied_node_format = module_kind_from_i32(get_int(o, "impliedNodeFormat")?);
+            // The Go decoder tries the no-signature form first. Its other form ignores noSignature,
+            // including a value of the wrong type, and reads signature instead.
+            if get_bool(o, "noSignature").unwrap_or(false) {
+                Ok(Self {
+                    no_signature: Some(BuildInfoFileInfoNoSignature {
+                        version,
+                        no_signature: true,
+                        affects_global_scope,
+                        implied_node_format,
+                    }),
+                    ..Self::default()
+                })
+            } else {
+                Ok(Self {
+                    file_info: Some(BuildInfoFileInfoWithSignature {
+                        version,
                         signature: get_string(o, "signature")?,
-                        affects_global_scope: get_bool(o, "affectsGlobalScope")?,
-                        implied_node_format: module_kind_from_i32(get_int(o, "impliedNodeFormat")?),
-                    })
-                })()
-                .map_err(|_| format!("invalid BuildInfoFileInfo: {}", show(data)))?;
-                Ok(BuildInfoFileInfo { file_info: Some(file_info), ..Default::default() })
+                        affects_global_scope,
+                        implied_node_format,
+                    }),
+                    ..Self::default()
+                })
             }
-        }
+        };
+        decode().map_err(|_| format!("invalid BuildInfoFileInfo: {}", show(data)))
     }
 }
 
@@ -746,13 +749,10 @@ impl BuildInfo {
     }
 
     // Go `json.Unmarshal(data, &buildInfo)`.
-    fn unmarshal_json(data: &Value) -> Result<BuildInfo, String> {
-        Self::unmarshal_json_with_canonical_diagnostics(data, true)
-    }
-
     fn unmarshal_json_with_canonical_diagnostics(
         data: &Value,
         canonical_diagnostics: bool,
+        file_ids_list: Option<Vec<Vec<BuildInfoFileId>>>,
     ) -> Result<BuildInfo, String> {
         let o = as_object(data)?;
         // Both directions require a fresh check: canonical diagnostics cannot be reused by Go/API history,
@@ -794,9 +794,12 @@ impl BuildInfo {
             file_names: get_string_array(o, "fileNames")?,
             file_infos: get_array(o, "fileInfos", BuildInfoFileInfo::unmarshal_json)?,
             file_infos_non_nil: matches!(o.get("fileInfos"), Some(Value::Array(_))),
-            file_ids_list: get_array(o, "fileIdsList", |v| {
-                as_uint_list(v).ok_or_else(|| "invalid fileIdsList".to_string())
-            })?,
+            file_ids_list: match file_ids_list {
+                Some(lists) => lists,
+                None => get_array(o, "fileIdsList", |v| {
+                    as_uint_list(v).ok_or_else(|| "invalid fileIdsList".to_string())
+                })?,
+            },
             options: match o.get("options") {
                 None | Some(Value::Null) => None,
                 Some(Value::Object(m)) => Some(m.clone()),
@@ -870,17 +873,20 @@ impl BuildInfo {
                 write_compact(out, &info.marshal_json());
             });
         }
+        let mut decimal = itoa::Buffer::new();
+        let mut write_id =
+            |out: &mut String, &id: &BuildInfoFileId| out.push_str(decimal.format(id));
         w.list("fileIdsList", &self.file_ids_list, |out, ids| {
-            write_array(out, ids, |out, &id| {
-                tsrs_core::json::write_compact_int(out, id as i64);
-            });
+            write_array(out, ids, &mut write_id);
         });
         if let Some(options) = &self.options {
             // omitzero on a pointer: only nil is omitted.
             w.key("options");
             write_compact(w.out, &Value::Object(options.clone()));
         }
-        w.values("referencedMap", &self.referenced_map, BuildInfoReferenceMapEntry::marshal_json);
+        w.list("referencedMap", &self.referenced_map, |out, entry| {
+            write_array(out, &[entry.file_id, entry.file_id_list_id], &mut write_id);
+        });
         w.values(
             "semanticDiagnosticsPerFile",
             &self.semantic_diagnostics_per_file,
@@ -919,17 +925,15 @@ impl BuildInfo {
     }
 
     pub fn unmarshal(text: &str) -> Result<BuildInfo, String> {
-        BuildInfo::unmarshal_json(&tsrs_core::json::unmarshal(text)?)
+        Self::unmarshal_with_canonical_diagnostics(text, true)
     }
 
     pub(crate) fn unmarshal_with_canonical_diagnostics(
         text: &str,
         canonical_diagnostics: bool,
     ) -> Result<BuildInfo, String> {
-        Self::unmarshal_json_with_canonical_diagnostics(
-            &tsrs_core::json::unmarshal(text)?,
-            canonical_diagnostics,
-        )
+        let (data, file_ids_list) = tsrs_core::json::unmarshal_with_u32_lists(text, "fileIdsList")?;
+        Self::unmarshal_json_with_canonical_diagnostics(&data, canonical_diagnostics, file_ids_list)
     }
 
     // buildInfo.go:500
@@ -1209,35 +1213,35 @@ impl ObjWriter<'_> {
 struct Obj(JsonMap);
 
 impl Obj {
-    fn set(&mut self, key: &str, v: Value) {
-        self.0.insert(key.to_string(), v);
+    fn set(&mut self, key: &'static str, v: Value) {
+        self.0.insert(key, v);
     }
-    fn str(&mut self, key: &str, v: &str) {
+    fn str(&mut self, key: &'static str, v: &str) {
         if !v.is_empty() {
             self.set(key, Value::String(v.to_string()));
         }
     }
-    fn bool(&mut self, key: &str, v: bool) {
+    fn bool(&mut self, key: &'static str, v: bool) {
         if v {
             self.set(key, Value::Bool(true));
         }
     }
-    fn int(&mut self, key: &str, v: i32) {
+    fn int(&mut self, key: &'static str, v: i32) {
         if v != 0 {
             self.set(key, num(v));
         }
     }
-    fn uint(&mut self, key: &str, v: u32) {
+    fn uint(&mut self, key: &'static str, v: u32) {
         if v != 0 {
             self.set(key, Value::Number(v as f64));
         }
     }
-    fn list<T>(&mut self, key: &str, items: &[T], f: impl Fn(&T) -> Value) {
+    fn list<T>(&mut self, key: &'static str, items: &[T], f: impl Fn(&T) -> Value) {
         if !items.is_empty() {
             self.set(key, Value::Array(items.iter().map(f).collect()));
         }
     }
-    fn opt_strings(&mut self, key: &str, v: Option<&[String]>) {
+    fn opt_strings(&mut self, key: &'static str, v: Option<&[String]>) {
         // omitzero on a slice omits nil and empty slices.
         if let Some(v) = v
             && !v.is_empty()

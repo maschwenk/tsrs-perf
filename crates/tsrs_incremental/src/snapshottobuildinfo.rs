@@ -4,6 +4,7 @@ use rustc_hash::FxHashMap;
 use tsrs_ast::{self as ast, Diagnostic, RepopulateDiagnosticInfo, SourceFile};
 use tsrs_compiler::Program as CompilerProgram;
 use tsrs_core::P;
+use tsrs_core::collections::OrderedSet;
 use tsrs_core::json::{JsonMap, Value};
 use tsrs_core::tspath::{self, ComparePathsOptions, Path};
 use tsrs_tsoptions::{
@@ -42,7 +43,6 @@ pub fn snapshot_to_build_info(
             use_case_sensitive_file_names: program.use_case_sensitive_file_names(),
         },
         file_name_to_file_id: FxHashMap::default(),
-        file_names_to_file_id_list_id: FxHashMap::default(),
         roots: FxHashMap::default(),
     };
 
@@ -94,7 +94,6 @@ struct ToBuildInfo<'a> {
     build_info_directory: String,
     compare_paths_options: ComparePathsOptions,
     file_name_to_file_id: FxHashMap<String, BuildInfoFileId>,
-    file_names_to_file_id_list_id: FxHashMap<Vec<BuildInfoFileId>, BuildInfoFileIdListId>,
     roots: FxHashMap<P<SourceFile>, Path>,
 }
 
@@ -128,11 +127,7 @@ impl ToBuildInfo<'_> {
     }
 
     // snapshottobuildinfo.go:91
-    #[expect(
-        clippy::wrong_self_convention,
-        reason = "The method name and mutable receiver match the upstream Go operation."
-    )]
-    fn to_file_id_list_id(&mut self, set: &RefSet) -> BuildInfoFileIdListId {
+    fn sorted_file_ids(&mut self, set: &RefSet) -> Vec<BuildInfoFileId> {
         // Go maps the set's keys in random order, so a path seen here for the first time gets an id that depends on
         // that order; the port gives new ids in sorted path order. Only paths without an id need sorting.
         let mut file_ids: Vec<BuildInfoFileId> = Vec::with_capacity(set.len());
@@ -146,29 +141,7 @@ impl ToBuildInfo<'_> {
         new_paths.sort();
         file_ids.extend(new_paths.into_iter().map(|path| self.to_file_id(path)));
         file_ids.sort_unstable();
-        self.to_file_id_list_id_of_sorted_ids(file_ids)
-    }
-
-    #[expect(
-        clippy::wrong_self_convention,
-        reason = "The method name and mutable receiver match the upstream Go operation."
-    )]
-    fn to_file_id_list_id_of_sorted_ids(
-        &mut self,
-        file_ids: Vec<BuildInfoFileId>,
-    ) -> BuildInfoFileIdListId {
-        // Go keys the map by the ids joined with ","; the id list itself is the same key.
-        let mut file_id_list_id =
-            self.file_names_to_file_id_list_id.get(file_ids.as_slice()).copied().unwrap_or(0);
-        if file_id_list_id == 0 {
-            self.file_names_to_file_id_list_id.insert(
-                file_ids.clone(),
-                self.build_info.file_ids_list.len() as BuildInfoFileIdListId + 1,
-            );
-            self.build_info.file_ids_list.push(file_ids);
-            file_id_list_id = self.build_info.file_ids_list.len() as BuildInfoFileIdListId;
-        }
-        file_id_list_id
+        file_ids
     }
 
     // snapshottobuildinfo.go:108
@@ -511,7 +484,7 @@ impl ToBuildInfo<'_> {
             .collect();
         // Most reference sets name only files that already have ids (every program file got one above). Their sorted
         // id lists are computed up front, on the worker pool, reading the id map only; a set with a path that has no
-        // id yet goes through to_file_id_list_id in order below, so new ids are given exactly as before.
+        // id yet gets its missing ids in order below, so new ids are given exactly as before.
         let known_ids = &self.file_name_to_file_id;
         let ids_if_known = |references: &std::sync::Arc<RefSet>| -> Option<Vec<BuildInfoFileId>> {
             let mut file_ids = Vec::with_capacity(references.len());
@@ -529,17 +502,21 @@ impl ToBuildInfo<'_> {
             tsrs_compiler::worker_pool()
                 .install(|| references.par_iter().map(ids_if_known).collect())
         };
+        let mut file_id_lists = OrderedSet::default();
         let mut referenced_map = Vec::with_capacity(keys.len());
         referenced_map.extend(keys.iter().zip(&references).zip(known).map(
             |((file_path, references), known)| {
                 let file_id = self.to_file_id(file_path);
-                let file_id_list_id = match known {
-                    Some(file_ids) => self.to_file_id_list_id_of_sorted_ids(file_ids),
-                    None => self.to_file_id_list_id(references),
-                };
-                BuildInfoReferenceMapEntry { file_id, file_id_list_id }
+                let ids = known.unwrap_or_else(|| self.sorted_file_ids(references));
+                // Wire IDs are one-based, in the order distinct lists first occur.
+                let (index, _) = file_id_lists.insert_full(ids);
+                BuildInfoReferenceMapEntry {
+                    file_id,
+                    file_id_list_id: index as BuildInfoFileIdListId + 1,
+                }
             },
         ));
+        self.build_info.file_ids_list = file_id_lists.into_iter().collect();
         self.build_info.referenced_map = referenced_map;
     }
 

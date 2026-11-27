@@ -233,17 +233,51 @@ fn write_string(out: &mut String, s: &str) {
 }
 
 pub fn unmarshal(input: &str) -> Result<Value, String> {
+    parse_document(input, |p| p.parse_value(0))
+}
+
+/// Decode a top-level array of unsigned integer lists separately from the rest of a JSON object.
+///
+/// The extracted member is null in the returned document. A missing member or another wire shape
+/// stays in the ordinary document so the consumer applies its usual defaults, conversions and errors.
+pub fn unmarshal_with_u32_lists(
+    input: &str,
+    field: &str,
+) -> Result<(Value, Option<Vec<Vec<u32>>>), String> {
+    let mut lists = None;
+    let doc = parse_document(input, |p| {
+        if p.s.get(p.pos) != Some(&b'{') {
+            return p.parse_value(0);
+        }
+        p.parse_object(|p, key| {
+            if key == field {
+                let start = p.pos;
+                if let Ok(value) = p.parse_array(|p| p.parse_array(JsonParser::parse_decimal_u32)) {
+                    lists = Some(value);
+                    return Ok(Value::Null);
+                }
+                // Null rows and non-decimal forms such as 1e2 go through the normal decoder.
+                // Retrying at the original offset also preserves all syntax and duplicate-key errors.
+                p.pos = start;
+            }
+            p.parse_value(1)
+        })
+    })?;
+    Ok((doc, lists))
+}
+
+fn parse_document<T>(
+    input: &str,
+    parse: impl FnOnce(&mut JsonParser<'_>) -> Result<T, String>,
+) -> Result<T, String> {
     let mut p = JsonParser { s: input.as_bytes(), pos: 0 };
     p.skip_ws();
-    let v = p.parse_value(0)?;
+    let value = parse(&mut p)?;
     p.skip_ws();
     if p.pos != p.s.len() {
-        return Err(format!(
-            "jsontext: invalid character after top-level value at offset {}",
-            p.pos
-        ));
+        return p.err("invalid character after top-level value");
     }
-    Ok(v)
+    Ok(value)
 }
 
 /// The f64 of a JSON number literal `text` (valid JSON number syntax), or `None` when it is out of range.
@@ -295,73 +329,108 @@ impl JsonParser<'_> {
             Some(b't') => self.literal("true", Value::Bool(true)),
             Some(b'f') => self.literal("false", Value::Bool(false)),
             Some(b'"') => Ok(Value::String(self.parse_string()?)),
-            Some(b'[') => {
-                self.pos += 1;
-                let mut items = Vec::new();
-                self.skip_ws();
-                if self.s.get(self.pos) == Some(&b']') {
+            Some(b'[') => self.parse_array(|p| p.parse_value(depth + 1)).map(Value::Array),
+            Some(b'{') => self.parse_object(|p, _| p.parse_value(depth + 1)),
+            Some(b'-' | b'0'..=b'9') => self.parse_number(),
+            Some(_) => self.err("invalid character at start of value"),
+        }
+    }
+
+    fn parse_array<T>(
+        &mut self,
+        mut element: impl FnMut(&mut Self) -> Result<T, String>,
+    ) -> Result<Vec<T>, String> {
+        if self.s.get(self.pos) != Some(&b'[') {
+            return self.err("expected array");
+        }
+        self.pos += 1;
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.s.get(self.pos) == Some(&b']') {
+            self.pos += 1;
+            return Ok(items);
+        }
+        loop {
+            self.skip_ws();
+            items.push(element(self)?);
+            self.skip_ws();
+            match self.s.get(self.pos) {
+                Some(b',') => self.pos += 1,
+                Some(b']') => {
                     self.pos += 1;
-                    return Ok(Value::Array(items));
+                    return Ok(items);
                 }
-                loop {
-                    self.skip_ws();
-                    items.push(self.parse_value(depth + 1)?);
-                    self.skip_ws();
-                    match self.s.get(self.pos) {
-                        Some(b',') => self.pos += 1,
-                        Some(b']') => {
-                            self.pos += 1;
-                            return Ok(Value::Array(items));
-                        }
-                        _ => return self.err("invalid character in array"),
-                    }
+                _ => return self.err("invalid character in array"),
+            }
+        }
+    }
+
+    fn parse_object(
+        &mut self,
+        mut member: impl FnMut(&mut Self, &str) -> Result<Value, String>,
+    ) -> Result<Value, String> {
+        self.pos += 1;
+        let mut members = JsonMap::default();
+        self.skip_ws();
+        if self.s.get(self.pos) == Some(&b'}') {
+            self.pos += 1;
+            return Ok(Value::Object(members));
+        }
+        loop {
+            self.skip_ws();
+            if self.s.get(self.pos) != Some(&b'"') {
+                return self.err("invalid character in object key");
+            }
+            let key = self.parse_string()?;
+            self.skip_ws();
+            if self.s.get(self.pos) != Some(&b':') {
+                return self.err("missing colon after object key");
+            }
+            self.pos += 1;
+            self.skip_ws();
+            let value = member(self, &key)?;
+            match members.entry(key) {
+                Entry::Occupied(entry) => {
+                    return self.err(&format!(
+                        "duplicate object member name {}",
+                        marshal_string(entry.key())
+                    ));
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(value);
                 }
             }
-            Some(b'{') => {
-                self.pos += 1;
-                let mut members = JsonMap::default();
-                self.skip_ws();
-                if self.s.get(self.pos) == Some(&b'}') {
+            self.skip_ws();
+            match self.s.get(self.pos) {
+                Some(b',') => self.pos += 1,
+                Some(b'}') => {
                     self.pos += 1;
                     return Ok(Value::Object(members));
                 }
-                loop {
-                    self.skip_ws();
-                    if self.s.get(self.pos) != Some(&b'"') {
-                        return self.err("invalid character in object key");
-                    }
-                    let key = self.parse_string()?;
-                    self.skip_ws();
-                    if self.s.get(self.pos) != Some(&b':') {
-                        return self.err("missing colon after object key");
-                    }
-                    self.pos += 1;
-                    self.skip_ws();
-                    let value = self.parse_value(depth + 1)?;
-                    match members.entry(key) {
-                        Entry::Occupied(entry) => {
-                            return self.err(&format!(
-                                "duplicate object member name {}",
-                                marshal_string(entry.key())
-                            ));
-                        }
-                        Entry::Vacant(entry) => {
-                            entry.insert(value);
-                        }
-                    }
-                    self.skip_ws();
-                    match self.s.get(self.pos) {
-                        Some(b',') => self.pos += 1,
-                        Some(b'}') => {
-                            self.pos += 1;
-                            return Ok(Value::Object(members));
-                        }
-                        _ => return self.err("invalid character in object"),
-                    }
-                }
+                _ => return self.err("invalid character in object"),
             }
-            Some(b'-' | b'0'..=b'9') => self.parse_number(),
-            Some(_) => self.err("invalid character at start of value"),
+        }
+    }
+
+    // The compact decimal form written by Go and tsrs. The enclosing array checks the delimiter.
+    fn parse_decimal_u32(&mut self) -> Result<u32, String> {
+        match self.s.get(self.pos) {
+            Some(b'0') => {
+                self.pos += 1;
+                Ok(0)
+            }
+            Some(b'1'..=b'9') => {
+                let mut value = 0u32;
+                while let Some(&digit @ b'0'..=b'9') = self.s.get(self.pos) {
+                    value = value
+                        .checked_mul(10)
+                        .and_then(|n| n.checked_add(u32::from(digit - b'0')))
+                        .ok_or_else(|| "integer out of range".to_string())?;
+                    self.pos += 1;
+                }
+                Ok(value)
+            }
+            _ => self.err("expected unsigned integer"),
         }
     }
 
