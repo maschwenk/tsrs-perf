@@ -181,7 +181,7 @@ pub struct NodeBuilderImpl {
     pub(crate) clone_binding_name_visitor: OnceCell<VisitFn>,
 
     // symbols for synthesized identifiers, needed for e.g. inlay hints
-    pub(crate) id_to_symbol: P<RefCell<FxHashMap<P<Node>, P<Symbol>>>>,
+    pub(crate) id_to_symbol: Option<P<RefCell<FxHashMap<P<Node>, P<Symbol>>>>>,
 
     /// Rust only: lends the checker to visitor callbacks (`cloneBindingName`, `getExistingNodeTreeVisitor`), which
     /// Go writes as closures over `b.ch`. See `CheckerSlot`.

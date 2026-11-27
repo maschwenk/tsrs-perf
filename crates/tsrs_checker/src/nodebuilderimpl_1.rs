@@ -27,11 +27,6 @@ pub(crate) fn new_node_builder_impl(
     // A builder whose emit context is a per-file scratch one (emit's requests) dies with that file, and so do its
     // state and caches (notes/mem-emit-regions.md).
     let scratch = e.factory.is_scratch();
-    // The map is shared with the caller (Go map semantics): language service code reads it back.
-    let id_to_symbol = match id_to_symbol {
-        Some(id_to_symbol) => id_to_symbol,
-        None => P::new_in(scratch, RefCell::new(FxHashMap::default())),
-    };
     let b = P::new_in(
         scratch,
         NodeBuilderImpl {
@@ -2022,9 +2017,11 @@ impl NodeBuilderImpl {
             let original = range_;
             range_ = range_.clone_node(&self.f); // if `range` is synthesized or originates in another file, copy it so it definitely has synthetic positions
             range_.set_loc(TextRange::synthetic());
-            let symbol = self.id_to_symbol.borrow().get(&original).copied();
-            if let Some(symbol) = symbol {
-                self.id_to_symbol.borrow_mut().insert(range_, symbol);
+            if let Some(id_to_symbol) = self.id_to_symbol {
+                let mut map = id_to_symbol.borrow_mut();
+                if let Some(&symbol) = map.get(&original) {
+                    map.insert(range_, symbol);
+                }
             }
         }
         let Some(location) = location else {
@@ -2561,13 +2558,17 @@ impl NodeBuilderImpl {
             Kind::Identifier => {
                 let cloned = self.f.deep_clone_node(Some(name)).unwrap();
                 self.e.set_emit_flags(cloned, EmitFlags::NoAsciiEscaping);
-                self.id_to_symbol.borrow_mut().insert(cloned, parameter_symbol);
+                if let Some(id_to_symbol) = self.id_to_symbol {
+                    id_to_symbol.borrow_mut().insert(cloned, parameter_symbol);
+                }
                 cloned
             }
             Kind::QualifiedName => {
                 let cloned = self.f.deep_clone_node(Some(name.as_qualified_name().right)).unwrap();
                 self.e.set_emit_flags(cloned, EmitFlags::NoAsciiEscaping);
-                self.id_to_symbol.borrow_mut().insert(cloned, parameter_symbol);
+                if let Some(id_to_symbol) = self.id_to_symbol {
+                    id_to_symbol.borrow_mut().insert(cloned, parameter_symbol);
+                }
                 cloned
             }
             _ => self.clone_binding_name(c, name),
