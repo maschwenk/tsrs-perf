@@ -4149,15 +4149,24 @@ impl Checker {
         self.get_member_of_structured_type_hashed(t, HashedName::new(name))
     }
 
+    #[inline]
     pub(crate) fn get_member_of_structured_type_hashed(
         &mut self,
         t: P<Type>,
         key: HashedName<'_>,
     ) -> Option<P<Symbol>> {
-        // Eager resolution installs the member table directly, including for mapped types.
-        if !self.lazy_members {
-            return self.resolve_structured_type_members(t).members()?.lookup_hashed(key);
+        if self.lazy_members {
+            return self.get_member_with_lazy_tables(t, key);
         }
+        // Eager resolution installs the member table directly, including for mapped types.
+        self.resolve_structured_type_members(t).members()?.lookup_hashed(key)
+    }
+
+    fn get_member_with_lazy_tables(
+        &mut self,
+        t: P<Type>,
+        key: HashedName<'_>,
+    ) -> Option<P<Symbol>> {
         if t.object_flags().intersects(ObjectFlags::Mapped)
             && !is_reserved_member_name(key.as_str())
             && let Some(lazy) = self.get_lazy_mapped_table(t)
