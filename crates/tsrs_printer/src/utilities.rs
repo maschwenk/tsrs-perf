@@ -1107,7 +1107,21 @@ impl LineCharacterCache {
     // getLineAndCharacter returns the 0-based line number and UTF-16 code unit
     // offset from the start of that line for the given byte position.
     pub(crate) fn get_line_and_character(&mut self, pos: u32) -> (u32, UTF16Offset) {
-        let line = scanner::compute_line_of_position(self.line_map, pos);
+        // A mapping usually stays on the previous line or moves to the next one.
+        let line = if pos >= self.line_map[self.cached_line] {
+            match self.line_map.get(self.cached_line + 1) {
+                Some(&next_start) if pos >= next_start => {
+                    if self.line_map.get(self.cached_line + 2).is_none_or(|&end| pos < end) {
+                        self.cached_line + 1
+                    } else {
+                        scanner::compute_line_of_position(self.line_map, pos)
+                    }
+                }
+                _ => self.cached_line,
+            }
+        } else {
+            scanner::compute_line_of_position(self.line_map, pos)
+        };
         let line_start = self.line_map[line];
         // When pos is beyond the source text (e.g., for error-recovery tokens like
         // missing closing braces), we can't slice past the text end. Compute the
