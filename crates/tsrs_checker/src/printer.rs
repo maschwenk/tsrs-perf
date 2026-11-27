@@ -609,14 +609,7 @@ impl Checker {
         type_symbol: P<Symbol>,
         enclosing_declaration: Option<P<Node>>,
     ) -> bool {
-        let access = self.is_symbol_accessible_worker(
-            Some(type_symbol),
-            enclosing_declaration,
-            SymbolFlags::Type, /*shouldComputeAliasesToMakeVisible*/
-            false,             /*allowModules*/
-            true,
-        );
-        access.accessibility == SymbolAccessibility::Accessible
+        self.symbol_is_visible(Some(type_symbol), enclosing_declaration, SymbolFlags::Type, true)
     }
 
     // symbolaccessibility.go:16
@@ -625,14 +618,7 @@ impl Checker {
         symbol: Option<P<Symbol>>,
         enclosing_declaration: Option<P<Node>>,
     ) -> bool {
-        let access = self.is_symbol_accessible_worker(
-            symbol,
-            enclosing_declaration,
-            SymbolFlags::Value,
-            false, /*shouldComputeAliasesToMakeVisible*/
-            true,  /*allowModules*/
-        );
-        access.accessibility == SymbolAccessibility::Accessible
+        self.symbol_is_visible(symbol, enclosing_declaration, SymbolFlags::Value, true)
     }
 
     // symbolaccessibility.go:21
@@ -642,14 +628,30 @@ impl Checker {
         enclosing_declaration: Option<P<Node>>,
         flags: SymbolFlags,
     ) -> bool {
-        let access = self.is_symbol_accessible_worker(
-            Some(symbol),
-            enclosing_declaration,
-            flags, /*shouldComputeAliasesToMakeVisible*/
-            false, /*allowModules*/
+        self.symbol_is_visible(Some(symbol), enclosing_declaration, flags, false)
+    }
+
+    /// Declaration and type printers that only need a visibility decision can avoid formatting
+    /// a diagnostic name when no accessible chain exists.
+    pub(crate) fn symbol_is_visible(
+        &mut self,
+        symbol: Option<P<Symbol>>,
+        enclosing_declaration: Option<P<Node>>,
+        meaning: SymbolFlags,
+        allow_modules: bool,
+    ) -> bool {
+        let (Some(symbol), Some(enclosing)) = (symbol, enclosing_declaration) else {
+            return true;
+        };
+        self.is_any_symbol_accessible(
+            &[symbol],
+            Some(enclosing),
+            symbol,
+            meaning,
             false,
-        ); // TODO: Strada bug? Why is this allowModules: false?
-        access.accessibility == SymbolAccessibility::Accessible
+            allow_modules,
+        )
+        .is_some_and(|result| result.accessibility == SymbolAccessibility::Accessible)
     }
 
     // symbolaccessibility.go:26

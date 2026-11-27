@@ -345,14 +345,12 @@ impl NodeBuilderImpl {
             };
             let mut parent_symbol: Option<P<Symbol>> = None;
             if let Some(node_symbol) = node_symbol
-                && c.is_symbol_accessible(
+                && c.symbol_is_visible(
                     Some(node_symbol),
                     ctx.enclosing_declaration.get(),
                     meaning,
-                    false,
+                    true,
                 )
-                .accessibility
-                    == SymbolAccessibility::Accessible
             {
                 parent_symbol = Some(self.lookup_symbol_chain(c, node_symbol, meaning, true)[0]);
             }
@@ -611,9 +609,7 @@ impl ExistingNodeTree {
             let this_container =
                 checker::Checker::get_this_container(leftmost, false, false).unwrap();
             sym = c.get_symbol_of_declaration(this_container);
-            if c.is_symbol_accessible(sym, Some(leftmost), meaning, false).accessibility
-                != SymbolAccessibility::Accessible
-            {
+            if !c.symbol_is_visible(sym, Some(leftmost), meaning, true) {
                 introduces_error = true;
                 self.tracker().report_inaccessible_this_error();
             }
@@ -684,7 +680,7 @@ impl ExistingNodeTree {
             }
             if !sym.flags().intersects(SymbolFlags::TypeParameter) /* Type parameters are visible in the current context if they are are resolvable */
                 && !ast::is_declaration_name(node)
-                && c.is_symbol_accessible(Some(sym), enclosing_declaration, meaning, false).accessibility != SymbolAccessibility::Accessible
+                && !c.symbol_is_visible(Some(sym), enclosing_declaration, meaning, true)
             {
                 self.tracker().report_inference_fallback(c, node);
                 introduces_error = true;

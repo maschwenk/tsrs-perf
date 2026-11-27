@@ -500,14 +500,7 @@ impl NodeBuilderImpl {
             resolved_symbol = c.resolve_alias(symbol);
         }
 
-        if c.is_symbol_accessible(
-            Some(symbol),
-            self.ctx().enclosing_declaration.get(),
-            meaning,
-            false,
-        )
-        .accessibility
-            != SymbolAccessibility::Accessible
+        if !c.symbol_is_visible(Some(symbol), self.ctx().enclosing_declaration.get(), meaning, true)
         {
             return None;
         }
